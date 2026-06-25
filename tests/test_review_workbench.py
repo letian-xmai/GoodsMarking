@@ -1124,7 +1124,9 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn("勾选不合格数", _HTML)
         self.assertIn("finalImageCount.textContent=images.length", _HTML)
         self.assertIn("invalidCheckedCount.textContent=document.querySelectorAll('input[data-id]:checked').length", _HTML)
-        self.assertIn("finalStats.style.display=activeView==='final'?'flex':'none'", _HTML)
+        self.assertIn(".labelStats{display:inline-flex", _HTML)
+        self.assertIn(".statPill:last-child{border-right:0}", _HTML)
+        self.assertIn("finalStats.style.display=activeView==='final'?'inline-flex':'none'", _HTML)
 
     def test_workbench_html_supports_original_image_status_adjustments(self):
         self.assertIn("rawAdjustments", _HTML)
