@@ -185,7 +185,7 @@ def _images_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 
     clean_query = str(query or "").strip()
     clean_filter = str(filter_by or "").strip()
     safe_page_size = max(1, page_size)
-    if getattr(workbench, "state_db", None) and clean_filter != "model_final":
+    if getattr(workbench, "state_db", None):
         return _sqlite_images_payload(workbench, workbench.state_db.workflow_metrics(), clean_query, clean_filter, page, safe_page_size)
     state = workbench.state_snapshot(blocking=blocking)
     if state is None:
@@ -222,11 +222,12 @@ def _images_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 
 
 def _sqlite_images_payload(workbench: ReviewWorkbench, metrics: dict, query: str, filter_by: str, page: int, page_size: int) -> dict:
     manual_status = "合格" if filter_by == "qualified" else ""
-    total = workbench.state_db.count_product_image_rows(query, manual_status)
+    model_status = "模型选中" if filter_by == "model_final" else ""
+    total = workbench.state_db.count_product_image_rows(query, manual_status, model_status)
     total_pages = max(1, (total + page_size - 1) // page_size)
     safe_page = min(max(1, page), total_pages)
     offset = (safe_page - 1) * page_size
-    image_rows = workbench.state_db.product_image_rows(query, manual_status, page_size, offset)
+    image_rows = workbench.state_db.product_image_rows(query, manual_status, model_status, page_size, offset)
     rows = [_sqlite_image_row(row) for row in image_rows]
     return {
         "metrics": metrics,
@@ -251,8 +252,8 @@ def _sqlite_image_row(row: dict[str, str]) -> dict[str, str]:
         "outward_code": row.get("outward_code", ""),
         "result_filename": Path(unquote(urlparse(image_url).path)).name,
         "image_url": image_url,
-        "download_status": "",
-        "model_status": "",
+        "download_status": row.get("download_status", ""),
+        "model_status": row.get("model_status", ""),
         "manual_status": manual_status or "未标注",
         "image_src": image_url,
     }
@@ -286,9 +287,12 @@ def _image_metrics(workbench: ReviewWorkbench, outward_code: str, fallback_total
     if workbench.state_db:
         total_images = workbench.state_db.count_product_images(outward_code) or fallback_total
         qualified_images = workbench.state_db.count_review_status("合格", outward_code)
+        model_final_images = workbench.state_db.count_model_status("模型选中", outward_code)
+    else:
+        model_final_images = _model_final_image_count(workbench, outward_code)
     return {
         "total_images": total_images,
-        "model_final_images": _model_final_image_count(workbench, outward_code),
+        "model_final_images": model_final_images,
         "qualified_images": qualified_images,
     }
 

@@ -13,7 +13,7 @@ from .full_evaluation import evaluate_full_testset
 from .group_index import build_group_index, iter_group_files, read_group_records
 from .progress import ProgressTable
 from .review_server import run_review_workbench
-from .review_workbench import STATUS_HEADER
+from .review_workbench import STATUS_HEADER, model_statuses, raw_manifest_rows
 from .selection import select_downloaded_group
 from .state_db import StateDb
 from .training_set import build_training_dataset
@@ -39,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         "evaluate-full-testset": command_evaluate_full_testset,
         "review-workbench": command_review_workbench,
         "migrate-state": command_migrate_state,
+        "sync-image-statuses": command_sync_image_statuses,
     }.get(args.command)
     if handler is not None:
         return handler(args)
@@ -88,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--progress", default="workflow_progress.csv")
     migrate.add_argument("--status-csv", default=DEFAULT_STATUS_CSV)
     migrate.add_argument("--source-workbook", default="")
+    sync_statuses = sub.add_parser("sync-image-statuses")
+    sync_statuses.add_argument("--result-dir", default="商品标注结果")
     return parser
 
 
@@ -184,6 +187,30 @@ def command_migrate_state(args) -> int:
     db.upsert_review_statuses(status_updates)
     print(f"migrated_source_images={source_count} migrated_progress={len(progress_rows)} migrated_review_statuses={len(status_updates)} state_db={Path(args.state_db).resolve()}")
     return 0
+
+
+def command_sync_image_statuses(args) -> int:
+    db = StateDb(args.state_db)
+    updated = db.update_product_image_statuses(_iter_result_image_statuses(Path(args.result_dir)))
+    print(f"synced_image_statuses={updated} state_db={Path(args.state_db).resolve()}")
+    return 0
+
+
+def _iter_result_image_statuses(result_dir: Path):
+    if not result_dir.exists():
+        return
+    for product_dir in sorted(path for path in result_dir.iterdir() if path.is_dir() and path.name != "bak"):
+        model_by_source = model_statuses(product_dir)
+        for filename, row in raw_manifest_rows(product_dir).items():
+            image_url = str(row.get("url", "")).strip()
+            if not image_url:
+                continue
+            yield {
+                "outward_code": product_dir.name,
+                "image_url": image_url,
+                "download_status": str(row.get("status", "")).strip(),
+                "model_status": model_by_source.get(filename, ""),
+            }
 
 
 def _read_csv_rows(path: Path, encoding: str) -> list[dict[str, str]]:

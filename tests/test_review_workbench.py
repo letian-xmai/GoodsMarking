@@ -905,7 +905,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow({"source_name": "a.jpg", "selected_final": "True"})
                 writer.writerow({"source_name": "b.jpg", "selected_final": "False"})
-            StateDb(state_db).upsert_review_statuses({("CODE1", "http://example.com/a.jpg"): "合格"})
+            db = StateDb(state_db)
+            db.upsert_review_statuses({("CODE1", "http://example.com/a.jpg"): "合格"})
+            db.update_product_image_statuses([
+                {"outward_code": "CODE1", "image_url": "http://example.com/a.jpg", "download_status": "downloaded", "model_status": "模型选中"},
+                {"outward_code": "CODE1", "image_url": "http://example.com/b.jpg", "download_status": "failed", "model_status": "模型排除"},
+            ])
 
             payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1")
             model_payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1", filter_by="model_final")
@@ -919,8 +924,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
             "qualified_images": 1,
         })
         self.assertEqual([row["outward_code"] for row in payload["images"]], ["CODE1", "CODE1"])
-        self.assertEqual([row["download_status"] for row in payload["images"]], ["", ""])
-        self.assertEqual([row["model_status"] for row in payload["images"]], ["", ""])
+        self.assertEqual([row["download_status"] for row in payload["images"]], ["downloaded", "failed"])
+        self.assertEqual([row["model_status"] for row in payload["images"]], ["模型选中", "模型排除"])
         self.assertEqual([row["manual_status"] for row in payload["images"]], ["合格", "未标注"])
         self.assertEqual(model_payload["pagination"]["total"], 1)
         self.assertEqual(model_payload["pagination"]["filter"], "model_final")

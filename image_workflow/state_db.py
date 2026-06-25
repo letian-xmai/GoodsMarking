@@ -99,18 +99,46 @@ class StateDb:
                     continue
                 source = str(row.get("source", "")).strip()
                 row_number = _int_value(row.get("row_number", "0"))
+                download_status = str(row.get("download_status", "")).strip()
+                model_status = str(row.get("model_status", "")).strip()
                 conn.execute(
                     """
-                    INSERT INTO product_images(outward_code, image_url, source, row_number, is_standard)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO product_images(outward_code, image_url, source, row_number, is_standard, download_status, model_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(outward_code, image_url) DO UPDATE SET
                         source = excluded.source,
                         row_number = excluded.row_number,
                         is_standard = excluded.is_standard,
+                        download_status = CASE WHEN excluded.download_status != '' THEN excluded.download_status ELSE product_images.download_status END,
+                        model_status = CASE WHEN excluded.model_status != '' THEN excluded.model_status ELSE product_images.model_status END,
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (outward_code, image_url, source, row_number, 1 if _is_standard_image(image_url, source) else 0),
+                    (outward_code, image_url, source, row_number, 1 if _is_standard_image(image_url, source) else 0, download_status, model_status),
                 )
+
+    def update_product_image_statuses(self, rows: Iterable[dict[str, str]]) -> int:
+        updated = 0
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            for row in rows:
+                outward_code = str(row.get("outward_code", "")).strip()
+                image_url = str(row.get("image_url", "")).strip()
+                if not outward_code or not image_url:
+                    continue
+                download_status = str(row.get("download_status", "")).strip()
+                model_status = str(row.get("model_status", "")).strip()
+                result = conn.execute(
+                    """
+                    UPDATE product_images
+                    SET download_status = CASE WHEN ? != '' THEN ? ELSE download_status END,
+                        model_status = CASE WHEN ? != '' THEN ? ELSE model_status END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE outward_code = ? AND image_url = ?
+                    """,
+                    (download_status, download_status, model_status, model_status, outward_code, image_url),
+                )
+                updated += result.rowcount
+        return updated
 
     def first_standard_image_urls(self, outward_codes: set[str]) -> dict[str, str]:
         params = sorted(outward_codes)
@@ -279,7 +307,7 @@ class StateDb:
                 row = conn.execute("SELECT COUNT(*) AS count FROM product_images").fetchone()
         return int(row["count"] or 0) if row else 0
 
-    def product_image_rows(self, outward_code: str = "", manual_status: str = "", limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+    def product_image_rows(self, outward_code: str = "", manual_status: str = "", model_status: str = "", limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
         where = []
         params: list[object] = []
         if outward_code:
@@ -288,6 +316,9 @@ class StateDb:
         if manual_status:
             where.append("COALESCE(r.manual_status, '') = ?")
             params.append(manual_status)
+        if model_status:
+            where.append("p.model_status = ?")
+            params.append(model_status)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
         params.extend([max(1, limit), max(0, offset)])
         with self._connect() as conn:
@@ -295,6 +326,7 @@ class StateDb:
             rows = conn.execute(
                 f"""
                 SELECT p.outward_code, p.image_url, p.source, p.row_number,
+                       p.download_status, p.model_status,
                        COALESCE(r.manual_status, '') AS manual_status
                 FROM product_images p
                 LEFT JOIN image_review_status r
@@ -308,7 +340,7 @@ class StateDb:
             ).fetchall()
         return [{key: "" if row[key] is None else str(row[key]) for key in row.keys()} for row in rows]
 
-    def count_product_image_rows(self, outward_code: str = "", manual_status: str = "") -> int:
+    def count_product_image_rows(self, outward_code: str = "", manual_status: str = "", model_status: str = "") -> int:
         where = []
         params: list[object] = []
         if outward_code:
@@ -317,6 +349,9 @@ class StateDb:
         if manual_status:
             where.append("COALESCE(r.manual_status, '') = ?")
             params.append(manual_status)
+        if model_status:
+            where.append("p.model_status = ?")
+            params.append(model_status)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
         with self._connect() as conn:
             self._ensure_schema(conn)
@@ -329,6 +364,20 @@ class StateDb:
                  AND p.image_url = r.image_url
                 {where_sql}
                 """,
+                params,
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def count_model_status(self, model_status: str, outward_code: str = "") -> int:
+        params: list[object] = [model_status]
+        where = "WHERE model_status = ?"
+        if outward_code:
+            where += " AND outward_code = ?"
+            params.append(outward_code)
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM product_images {where}",
                 params,
             ).fetchone()
         return int(row["count"] or 0) if row else 0
@@ -396,11 +445,15 @@ class StateDb:
                 source TEXT NOT NULL DEFAULT '',
                 row_number INTEGER NOT NULL DEFAULT 0,
                 is_standard INTEGER NOT NULL DEFAULT 0,
+                download_status TEXT NOT NULL DEFAULT '',
+                model_status TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(outward_code, image_url)
             )
             """
         )
+        _ensure_column(conn, "product_images", "download_status", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "product_images", "model_status", "TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_product_images_standard
@@ -453,6 +506,12 @@ def _is_standard_image(image_url: str, source: str) -> bool:
     if "cutout" in source_value:
         return False
     return "standard" in image_url.lower()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _int_value(value: object) -> int:
