@@ -1153,6 +1153,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('role="tablist"', _HTML)
         self.assertLess(_HTML.index('class="productbar"'), _HTML.index('class="tabsbar"'))
 
+    def test_workbench_html_styles_product_header(self):
+        self.assertIn('id="productHeader"', _HTML)
+        self.assertIn("#productHeader{display:flex", _HTML)
+        self.assertIn("background:linear-gradient(180deg,#fff,#f8fbff)", _HTML)
+        self.assertIn("#productHeader .product{font-size:18px", _HTML)
+        self.assertIn("#productHeader .status{font-weight:700", _HTML)
+
     def test_workbench_actions_float_at_bottom_center(self):
         self.assertIn('class="actions"', _HTML)
         self.assertIn('.actions{position:fixed', _HTML)
