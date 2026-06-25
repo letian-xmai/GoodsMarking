@@ -1119,6 +1119,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn("模型最终结果", _HTML)
         self.assertIn("商品原始照片", _HTML)
         self.assertIn("renderOriginalImages", _HTML)
+        self.assertIn('id="finalStats"', _HTML)
+        self.assertIn("全部图片数", _HTML)
+        self.assertIn("勾选不合格数", _HTML)
+        self.assertIn("finalImageCount.textContent=images.length", _HTML)
+        self.assertIn("invalidCheckedCount.textContent=document.querySelectorAll('input[data-id]:checked').length", _HTML)
+        self.assertIn("finalStats.style.display=activeView==='final'?'flex':'none'", _HTML)
 
     def test_workbench_html_supports_original_image_status_adjustments(self):
         self.assertIn("rawAdjustments", _HTML)
