@@ -8,7 +8,7 @@ import csv
 import hashlib
 import shutil
 
-from .review_xlsx import WorkbookProductSummary, apply_review_statuses, read_review_statuses as read_xlsx_review_statuses, read_workbook_product_summary
+from .review_xlsx import WorkbookProductSummary, read_review_statuses as read_xlsx_review_statuses, read_workbook_product_summary
 from .state_db import StateDb
 
 
@@ -194,8 +194,6 @@ class ReviewWorkbench:
                 status = INVALID_STATUS if review_id in invalid_ids else VALID_STATUS
                 updates[(image.outward_code, image.image_url)] = status
                 image_updates.append((image, status))
-            if self.status_file:
-                _append_review_statuses(self.status_file, updates)
             if self.state_db:
                 self.state_db.upsert_review_statuses(updates)
             for image, status in image_updates:
@@ -215,8 +213,6 @@ class ReviewWorkbench:
                     continue
                 updates[(image.outward_code, image.image_url)] = clean_status
                 image_updates.append((image, clean_status))
-            if self.status_file:
-                _append_review_statuses(self.status_file, updates)
             if self.state_db:
                 self.state_db.upsert_review_statuses(updates)
             product_by_code = {product.outward_code: product for product in state.products}
@@ -363,21 +359,6 @@ def read_review_statuses(status_source: str | Path | None, target_keys: set[tupl
             else:
                 statuses.pop(key, None)
     return statuses
-
-
-def _append_review_statuses(status_source: str | Path | None, updates: dict[tuple[str, str], str]) -> None:
-    if not updates:
-        return
-    if status_source is None:
-        raise ValueError("status_source is required when writing review statuses")
-    path = _review_status_sidecar_path(status_source)
-    write_header = not path.exists() or path.stat().st_size == 0
-    with open(path, "a", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["outward_code", "image_url", STATUS_HEADER])
-        if write_header:
-            writer.writeheader()
-        for (outward_code, image_url), status in updates.items():
-            writer.writerow({"outward_code": outward_code, "image_url": image_url, STATUS_HEADER: status})
 
 
 def _review_status_sidecar_path(workbook: str | Path) -> Path:

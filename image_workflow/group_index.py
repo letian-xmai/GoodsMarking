@@ -53,7 +53,7 @@ class _WriterCache:
 def build_group_index(
     xlsx_path: str | Path,
     index_dir: str | Path,
-    progress_path: str | Path | None = None,
+    state_db: str | Path | None = None,
     *,
     overwrite: bool = False,
 ) -> IndexSummary:
@@ -71,8 +71,8 @@ def build_group_index(
     finally:
         writer_cache.close()
     _write_group_index(root / "group_index.csv", counts)
-    if progress_path:
-        ProgressTable(progress_path).initialize_pending(dict(counts))
+    if state_db:
+        ProgressTable(state_db).initialize_pending(dict(counts))
     return IndexSummary(sum(counts.values()), len(counts), str(root))
 
 

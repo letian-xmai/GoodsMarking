@@ -16,10 +16,10 @@
 | --- | --- |
 | 源 Excel | `2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0.xlsx` |
 | 本地状态库 | `goods_marking.db` |
-| 人工状态 CSV | `2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv` |
+| 旧人工状态 CSV（仅迁移输入） | `2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv` |
 | 模型文件 | `模型训练数据/model/annotation_model.json` |
 | 正式结果根目录 | `商品标注结果/` |
-| 全局进度导出 CSV | `workflow_progress.csv` |
+| 旧全局进度 CSV（仅迁移输入） | `workflow_progress.csv` |
 | 当前 100 商品汇总 | `商品标注结果/formal_100_summary_20260624_222420.csv` |
 | 阈值说明 | `阈值配置手册.md` |
 | 工作台服务 | `image_workflow/review_server.py` |
@@ -67,13 +67,13 @@
 
 截至本文档生成时：
 
-- `workflow_progress.csv` 共 `39833` 个商品分组。
+- `goods_marking.db` 的 `product_progress` 表共 `39833` 个商品分组。
 - 已跑前 `100` 个商品。
 - 结果状态：`complete=43`，`shortfall=57`，`pending=39733`。
 - `formal_100_summary_20260624_222420.csv` 中 `verified=True` 为 `67`，`verified=False` 为 `33`。
 - 当前 100 个商品共选出 `2469` 张最终图片。
 
-这些数字是续跑前的基线；新会话应先重新读取当前文件确认是否有变化。
+这些数字是续跑前的基线；新会话应先重新读取 `goods_marking.db` 确认是否有变化。
 
 ## 5. 正式单商品处理流程
 
@@ -114,11 +114,11 @@ report = process_formal_group(
 全量执行前应先补齐或使用一个 formal runner，核心要求：
 
 - 读取 `.image_workflow_cache/group_index.csv` 中的商品分组文件；没有索引时用 `build_group_index()` 生成。
-- 跳过 `workflow_progress.csv` 中已完成的 `complete`、`shortfall`、`skipped_all_standard`，除非明确要求重跑。
+- 跳过 `goods_marking.db` 中已完成的 `complete`、`shortfall`、`skipped_all_standard`，除非明确要求重跑。
 - 每个商品调用 `process_formal_group()`，不要调用旧 `process_group()`。
 - 默认并发：`group_workers=3`，每组 `download_workers=4`。
-- 进度 CSV 必须单写入者或加锁写入；历史上并发写 `workflow_progress.csv` 出现过 NUL 字符损坏。
-- 每处理完一个商品立即写入进度和汇总，支持中断续跑。
+- 进度写入 `goods_marking.db`；历史上并发写 `workflow_progress.csv` 出现过 NUL 字符损坏，运行时不得再通过 CSV 维护进度。
+- 每处理完一个商品立即写入 SQLite 进度和汇总，支持中断续跑。
 
 推荐 runner 逻辑：
 
@@ -132,12 +132,12 @@ workbook = "2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0.xlsx"
 index_dir = Path(".image_workflow_cache")
 result_root = Path("商品标注结果")
 model_path = Path("模型训练数据/model/annotation_model.json")
-progress_path = Path("workflow_progress.csv")
+state_db = Path("goods_marking.db")
 
 if not (index_dir / "group_index.csv").exists():
-    build_group_index(workbook, index_dir, progress_path)
+    build_group_index(workbook, index_dir, state_db)
 
-pending_files = select_pending_group_files(iter_group_files(index_dir), progress_path)
+pending_files = select_pending_group_files(iter_group_files(index_dir), state_db)
 
 def run_one(group_file):
     records = read_group_records(group_file)
@@ -152,12 +152,25 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 
 ## 7. 工作台流程
 
+首次切换到 SQLite 状态库时，先执行一次旧状态迁移：
+
+```bash
+/Users/henry/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 \
+  -m image_workflow.cli \
+  --state-db /Users/henry/Documents/商品标注/goods_marking.db \
+  migrate-state \
+  --progress /Users/henry/Documents/商品标注/workflow_progress.csv \
+  --status-csv /Users/henry/Documents/商品标注/2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv
+```
+
+迁移后，`workflow_progress.csv` 和人工状态 CSV 只作为历史输入或人工审计文件，不再作为运行时状态源。
+
 启动工作台：
 
 ```bash
 /Users/henry/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 \
   -m image_workflow.cli review-workbench \
-  --status-csv /Users/henry/Documents/商品标注/2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv \
+  --state-db /Users/henry/Documents/商品标注/goods_marking.db \
   --result-dir /Users/henry/Documents/商品标注/商品标注结果 \
   --host 127.0.0.1 \
   --port 8765
@@ -171,35 +184,35 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 
 工作台规则：
 
-- 默认不扫描 XLSX，顶部指标从结果目录、`goods_marking.db` 和人工状态 CSV 汇总；显式传入 `--source-workbook` 时才读取源 Excel 做全量商品统计。
+- 默认不扫描 XLSX，顶部指标从结果目录和 `goods_marking.db` 汇总；显式传入 `--source-workbook` 时才读取源 Excel 做全量商品统计。
 - 商品默认展示模型最终结果。
 - 模型最终结果页默认状态为合格；勾选后表示不合格；提交本商品后，该商品标记完成。
 - 商品原始照片页展示全部原图状态：`未标注`、`合格`、`不合格`、`合格待确认`。
 - 原图若已在 `最终结果/` 且没有人工标注状态，显示 `合格待确认`，样式需与其他图片区分。
 - 原图点击切换规则：`未标注/不合格 -> 合格`，`合格/合格待确认 -> 不合格`。
-- 人工状态写入 `goods_marking.db`，并同步追加到人工状态 CSV 的 `人工标注状态` 字段；不再写状态 XLSX。
-- 服务默认只扫描结果目录和 CSV；只有显式传入 `--source-workbook` 时才会扫描较大的源 Excel。
+- 人工状态只写入 `goods_marking.db`，不再写状态 XLSX 或人工状态 CSV。
+- 服务默认只扫描结果目录和 SQLite 状态库；只有显式传入 `--source-workbook` 时才会扫描较大的源 Excel。
 
 ## 8. 全量执行前检查清单
 
 1. 当前目录是 `/Users/henry/Documents/商品标注`。
 2. 模型文件存在：`模型训练数据/model/annotation_model.json`。
-3. 源 Excel 存在；人工状态 CSV 存在或可由工作台首次提交时创建。
-4. `goods_marking.db` 可写；`workflow_progress.csv` 仅作为进度导出/兼容文件读取。
+3. 源 Excel 存在；旧人工状态 CSV 和旧进度 CSV 如需保留，先通过 `migrate-state` 导入 SQLite。
+4. `goods_marking.db` 可写；运行时不再通过 CSV 维护状态和进度。
 5. `商品标注结果/bak/` 有足够磁盘空间容纳重跑备份。
 6. 确认 runner 调用的是 `process_formal_group()`。
 7. 先跑 1 到 3 个 `pending` 商品检查目录结构和报告，再扩大到全量。
-8. 全量期间不要同时启动多个会写本地状态库和进度 CSV 的任务。
+8. 全量期间不要同时启动多个会写本地状态库的任务。
 
 ## 9. 新会话启动提示
 
 新会话应按下面顺序继续：
 
 1. 打开同一个项目目录 `/Users/henry/Documents/商品标注`。
-2. 阅读本文档、`image_workflow/formal_workflow.py`、`workflow_progress.csv`、`商品标注结果/formal_100_summary_20260624_222420.csv`。
+2. 阅读本文档、`image_workflow/formal_workflow.py`、`goods_marking.db`、`商品标注结果/formal_100_summary_20260624_222420.csv`。
 3. 确认当前 100 商品是否仍是最新基线。
-4. 如需全量执行，先补齐正式 formal runner 或 CLI 命令，再从 `workflow_progress.csv` 的 `pending` 商品续跑。
-5. 跑完一批后用工作台人工复核，并将人工状态写回 `goods_marking.db`，同时保留人工状态 CSV 导出。
+4. 如需全量执行，先补齐正式 formal runner 或 CLI 命令，再从 `goods_marking.db` 的 `pending` 商品续跑。
+5. 跑完一批后用工作台人工复核，并将人工状态写回 `goods_marking.db`。
 
 ## 10. 验证命令
 
@@ -208,4 +221,4 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 - `/Users/henry/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest discover -s tests`
 - `/Users/henry/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall image_workflow tests`
 
-只查看当前 100 商品汇总时，读取 `workflow_progress.csv` 和 `商品标注结果/formal_100_summary_20260624_222420.csv` 统计 `status`、`verified` 即可。
+只查看当前 100 商品汇总时，读取 `goods_marking.db` 和 `商品标注结果/formal_100_summary_20260624_222420.csv` 统计 `status`、`verified` 即可。

@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from xml.etree import ElementTree as ET
-from zipfile import ZIP_DEFLATED, ZipFile
-import shutil
+from zipfile import ZipFile
 
 
 NS_URI = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -94,47 +92,6 @@ def _is_standard_record(image_url: str, source: str) -> bool:
     return "standard" in image_url.lower()
 
 
-def apply_review_statuses(workbook: str | Path, updates: dict[tuple[str, str], str]) -> None:
-    if not updates:
-        return
-    workbook_path = Path(workbook)
-    status_col = _status_column(workbook_path)
-    shared = _shared_strings(workbook_path)
-    with NamedTemporaryFile(delete=False, suffix=".xlsx", dir=str(workbook_path.parent)) as temp:
-        temp_path = Path(temp.name)
-    try:
-        with ZipFile(workbook_path) as src, ZipFile(temp_path, "w", ZIP_DEFLATED) as dst:
-            for info in src.infolist():
-                with src.open(info.filename) as handle:
-                    if info.filename.startswith("xl/worksheets/sheet") and info.filename.endswith(".xml"):
-                        with dst.open(info.filename, "w") as out:
-                            _rewrite_sheet(handle, out, shared, updates, status_col, info.filename.endswith("sheet1.xml"))
-                    else:
-                        dst.writestr(info, handle.read())
-        shutil.move(str(temp_path), str(workbook_path))
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
-def _rewrite_sheet(source, output, shared: list[str], updates: dict[tuple[str, str], str], status_col: str, has_header: bool) -> None:
-    output.write(f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{NS_URI}"><sheetData>'.encode())
-    for _, row in ET.iterparse(source, events=("end",)):
-        if not row.tag.endswith("row"):
-            continue
-        row_number = int(row.attrib.get("r", "0") or 0)
-        values = _row_values(row, shared)
-        if has_header and row_number == 1 and values.get("A") == "outward_code":
-            _set_inline_cell(row, status_col, row_number, STATUS_HEADER)
-        else:
-            key = (values.get("A", ""), values.get("B", ""))
-            if key in updates:
-                _set_inline_cell(row, status_col, row_number, updates[key])
-        output.write(ET.tostring(row, encoding="utf-8"))
-        row.clear()
-    output.write(b"</sheetData></worksheet>")
-
-
 def _status_column(workbook: str | Path) -> str:
     shared = _shared_strings(workbook)
     with ZipFile(workbook) as zf, zf.open("xl/worksheets/sheet1.xml") as handle:
@@ -187,17 +144,3 @@ def _cell_text(cell, shared: list[str]) -> str:
         index = int(value.text)
         return shared[index] if index < len(shared) else ""
     return value.text
-
-
-def _set_inline_cell(row, column: str, row_number: int, value: str) -> None:
-    ref = f"{column}{row_number}"
-    cell = next((item for item in row if item.tag.endswith("c") and item.attrib.get("r") == ref), None)
-    if cell is None:
-        cell = ET.Element(f"{NS}c", {"r": ref, "t": "inlineStr"})
-        row.append(cell)
-    cell.attrib["t"] = "inlineStr"
-    for child in list(cell):
-        cell.remove(child)
-    inline = ET.SubElement(cell, f"{NS}is")
-    text = ET.SubElement(inline, f"{NS}t")
-    text.text = value

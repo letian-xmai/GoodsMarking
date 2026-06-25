@@ -12,11 +12,11 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import image_workflow.review_workbench as review_workbench_module
-from image_workflow.review_workbench import ReviewState, ReviewWorkbench, apply_review_statuses, read_review_statuses
+from image_workflow.review_workbench import ReviewState, ReviewWorkbench, read_review_statuses
 from image_workflow.review_xlsx import read_workbook_product_summary
-from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATE_DB, DEFAULT_STATUS_CSV, build_parser
+from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATE_DB, build_parser
 from image_workflow.review_server import _HTML, _batch_payload, _product_payload, _products_payload
+from image_workflow.state_db import StateDb
 
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -96,24 +96,6 @@ def write_raw_images(root, outward_code, images):
 
 
 class ReviewWorkbookTests(unittest.TestCase):
-    def test_apply_review_statuses_adds_single_manual_status_field(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workbook = Path(tmp) / "status.xlsx"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是"]),
-                    (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是"]),
-                ],
-            )
-
-            apply_review_statuses(workbook, {("CODE1", "http://example.com/a.jpg"): "不合格"})
-            statuses = read_review_statuses(workbook, {("CODE1", "http://example.com/a.jpg"), ("CODE1", "http://example.com/b.jpg")})
-
-        self.assertEqual(statuses[("CODE1", "http://example.com/a.jpg")], "不合格")
-        self.assertNotIn(("CODE1", "http://example.com/b.jpg"), statuses)
-
     def test_workbook_product_summary_counts_standard_and_cutout_urls_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             workbook = Path(tmp) / "status.xlsx"
@@ -201,6 +183,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -228,14 +211,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 ],
             )
 
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             state = workbench.build_state()
             batch = workbench.next_batch(state)
 
         self.assertEqual(state.metrics, {"total_products": 4, "completed_products": 0, "invalid_products": 1, "pending_annotation_products": 1, "unfinished_products": 3})
         self.assertEqual([item.outward_code for item in batch], ["CODE1"])
 
-    def test_review_workbench_reads_and_writes_csv_status_without_xlsx_status(self):
+    def test_review_workbench_reads_legacy_csv_status_without_xlsx_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result_root = root / "商品标注结果"
@@ -252,17 +235,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
 
             workbench = ReviewWorkbench(result_root, status_file=status_csv, batch_size=20)
             state = workbench.build_state()
-            pending = next(item for item in state.products[0].images if item.image_url == "http://example.com/b.jpg")
-            result = workbench.submit_product_statuses({pending.review_id: "不合格"})
-            reloaded = ReviewWorkbench(result_root, status_file=status_csv, batch_size=20).build_state()
 
-        self.assertEqual(result["updated"], 1)
-        self.assertEqual({image.image_url: image.review_status for image in reloaded.products[0].images}, {
+        self.assertEqual({image.image_url: image.review_status for image in state.products[0].images}, {
             "http://example.com/a.jpg": "合格",
-            "http://example.com/b.jpg": "不合格",
+            "http://example.com/b.jpg": "",
         })
 
-    def test_review_workbench_syncs_manual_statuses_to_sqlite_state_db(self):
+    def test_review_workbench_writes_manual_statuses_to_sqlite_state_db_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result_root = root / "商品标注结果"
@@ -282,6 +261,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
             reloaded = ReviewWorkbench(result_root, status_file=status_csv, state_db=state_db, batch_size=20).build_state()
 
         self.assertEqual(reloaded.products[0].images[0].review_status, "合格")
+        self.assertFalse(status_csv.exists())
 
     def test_review_workbench_can_use_sqlite_state_db_without_csv_status_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,6 +287,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -326,7 +307,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 ],
             )
 
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             state = workbench.build_state()
             rows = workbench.product_summaries()
 
@@ -340,6 +321,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -383,6 +365,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -410,7 +393,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
             )
             (result_root / "CODE3").mkdir(parents=True)
 
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             state = workbench.build_state()
             batch = workbench.next_batch(state)
 
@@ -421,6 +404,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -438,12 +422,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
                     {"url": "http://example.com/b.jpg", "source_name": "r000003__cutout__bbbb.jpg", "result_filename": "02_back_barcode__002__r000003__cutout__bbbb.jpg"},
                 ],
             )
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             state = workbench.build_state()
             batch = workbench.next_batch(state)
 
             summary = workbench.submit_batch([item.review_id for item in batch], {batch[1].review_id})
-            statuses = read_review_statuses(workbook, {("CODE1", "http://example.com/a.jpg"), ("CODE1", "http://example.com/b.jpg")})
+            statuses = StateDb(state_db).read_review_statuses({("CODE1", "http://example.com/a.jpg"), ("CODE1", "http://example.com/b.jpg")})
 
         self.assertEqual(summary["updated"], 2)
         self.assertEqual(statuses[("CODE1", "http://example.com/a.jpg")], "合格")
@@ -453,6 +437,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -503,6 +488,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -516,7 +502,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
             write_product_result(result_root, "CODE3", [{"url": "http://example.com/c.jpg", "source_name": "r3.jpg", "result_filename": "01__r3.jpg"}])
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
 
             default_payload = _product_payload(workbench)
             selected_payload = _product_payload(workbench, "CODE3")
@@ -530,6 +516,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -541,26 +528,22 @@ class ReviewWorkbenchTests(unittest.TestCase):
             )
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             code1_image = _product_payload(workbench, "CODE1")["images"][0]
 
             result = workbench.submit_product_statuses({code1_image["review_id"]: "不合格"})
-            statuses = read_review_statuses(workbook, {("CODE1", "http://example.com/a.jpg"), ("CODE2", "http://example.com/b.jpg")})
+            statuses = StateDb(state_db).read_review_statuses({("CODE1", "http://example.com/a.jpg"), ("CODE2", "http://example.com/b.jpg")})
             next_payload = _product_payload(workbench)
 
         self.assertEqual(result["updated"], 1)
         self.assertEqual(statuses[("CODE1", "http://example.com/a.jpg")], "不合格")
         self.assertEqual(next_payload["product"]["outward_code"], "CODE2")
 
-    def test_submit_product_statuses_does_not_rewrite_workbook_synchronously(self):
-        original_apply = review_workbench_module.apply_review_statuses
-
-        def fail_sync_rewrite(*_args, **_kwargs):
-            raise AssertionError("submit should not rewrite the xlsx during the request")
-
+    def test_submit_product_statuses_persists_to_sqlite_without_rewriting_workbook(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -572,16 +555,11 @@ class ReviewWorkbenchTests(unittest.TestCase):
             )
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             image = _product_payload(workbench, "CODE1")["images"][0]
 
-            try:
-                review_workbench_module.apply_review_statuses = fail_sync_rewrite
-                result = workbench.submit_product_statuses({image["review_id"]: "合格"})
-            finally:
-                review_workbench_module.apply_review_statuses = original_apply
-
-            reloaded = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20), "CODE1")
+            result = workbench.submit_product_statuses({image["review_id"]: "合格"})
+            reloaded = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), "CODE1")
 
         self.assertEqual(result["updated"], 1)
         self.assertEqual(reloaded["images"][0]["review_status"], "合格")
@@ -590,6 +568,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -607,11 +586,11 @@ class ReviewWorkbenchTests(unittest.TestCase):
                     {"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "02__r2.jpg"},
                 ],
             )
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             images = _product_payload(workbench, "CODE1")["images"]
 
             result = workbench.submit_product_statuses({item["review_id"]: "合格" for item in images})
-            statuses = read_review_statuses(workbook, {("CODE1", "http://example.com/a.jpg"), ("CODE1", "http://example.com/b.jpg")})
+            statuses = StateDb(state_db).read_review_statuses({("CODE1", "http://example.com/a.jpg"), ("CODE1", "http://example.com/b.jpg")})
             payload = _product_payload(workbench, "CODE1")
 
         self.assertEqual(result["updated"], 2)
@@ -622,6 +601,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -648,6 +628,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -682,6 +663,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             product = result_root / "CODE1"
             final = product / "最终结果"
@@ -715,6 +697,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -732,14 +715,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
                     {"url": "http://example.com/raw-b.jpg", "filename": "r000002__cutout__bbbb.jpg"},
                 ],
             )
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             raw_images = _product_payload(workbench, "CODE1")["raw_images"]
 
             result = workbench.submit_product_statuses({
                 raw_images[0]["review_id"]: "合格",
                 raw_images[1]["review_id"]: "合格",
             })
-            statuses = read_review_statuses(workbook, {
+            statuses = StateDb(state_db).read_review_statuses({
                 ("CODE1", "http://example.com/raw-a.jpg"),
                 ("CODE1", "http://example.com/raw-b.jpg"),
             })
@@ -754,6 +737,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             write_status_workbook(
                 workbook,
@@ -767,11 +751,11 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 "CODE1",
                 [{"url": "http://example.com/raw-a.jpg", "filename": "r000001__cutout__aaaa.jpg"}],
             )
-            workbench = ReviewWorkbench(result_root, workbook, batch_size=20)
+            workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             raw_image = _product_payload(workbench, "CODE1")["raw_images"][0]
 
             result = workbench.submit_product_statuses({raw_image["review_id"]: "合格"})
-            reloaded = ReviewWorkbench(result_root, workbook, batch_size=20)
+            reloaded = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
             payload = _product_payload(reloaded, "CODE1")
             summary = reloaded.product_summaries()[0]
 
@@ -886,8 +870,6 @@ class ReviewWorkbenchTests(unittest.TestCase):
             "review-workbench",
             "--source-workbook",
             "source.xlsx",
-            "--status-csv",
-            "status.csv",
             "--state-db",
             "state.db",
             "--result-dir",
@@ -900,7 +882,6 @@ class ReviewWorkbenchTests(unittest.TestCase):
 
         self.assertEqual(args.command, "review-workbench")
         self.assertEqual(args.source_workbook, "source.xlsx")
-        self.assertEqual(args.status_csv, "status.csv")
         self.assertEqual(args.state_db, "state.db")
         self.assertEqual(args.result_dir, "商品标注结果")
         self.assertEqual(args.port, 8999)
@@ -910,7 +891,6 @@ class ReviewWorkbenchTests(unittest.TestCase):
         args = build_parser().parse_args(["review-workbench"])
 
         self.assertEqual(args.source_workbook, "")
-        self.assertEqual(args.status_csv, DEFAULT_STATUS_CSV)
         self.assertEqual(args.state_db, DEFAULT_STATE_DB)
 
     def test_workbench_html_toggles_invalid_checkbox_when_image_clicked(self):

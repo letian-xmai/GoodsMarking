@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a local review workbench that shows model final images, lets a human mark invalid images in batches, and stores `人工标注状态` in the local SQLite state database with CSV export compatibility.
+**Goal:** Build a local review workbench that shows model final images, lets a human mark invalid images in batches, and stores `人工标注状态` in the local SQLite state database.
 
 **Architecture:** Add a focused `image_workflow.review_workbench` module with result scanning, status read/write helpers, batch selection, and a standard-library HTTP server. Wire it into `image_workflow.cli` as `review-workbench`.
 
-**Tech Stack:** Python standard library, SQLite, existing CSV/XLSX compatibility helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
+**Tech Stack:** Python standard library, SQLite, existing CSV/XLSX migration helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
 
 ---
 
@@ -28,7 +28,7 @@
 - Modify: `image_workflow/cli.py`
 
 - [ ] Add `GET /`, `GET /api/batch`, `POST /api/submit`, and `GET /image/{id}` handlers.
-- [ ] Add CLI command `review-workbench` with source-workbook/status-csv/state-db/result-dir/host/port/batch-size options.
+- [ ] Add CLI command `review-workbench` with source-workbook/state-db/result-dir/host/port/batch-size options.
 - [ ] Verify the command parser exposes the new command.
 
 ### Task 3: Verification

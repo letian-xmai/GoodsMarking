@@ -9,12 +9,13 @@ sys.path.insert(0, str(ROOT))
 from image_workflow.downloader import download_group
 from image_workflow.excel_reader import ExcelRecord
 from image_workflow.progress import ProgressTable
+from image_workflow.state_db import StateDb
 
 
 class ProgressTableTests(unittest.TestCase):
     def test_progress_table_records_assignment_and_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            table = ProgressTable(Path(tmp) / "workflow_progress.csv")
+            table = ProgressTable(Path(tmp) / "goods_marking.db")
             table.upsert(
                 outward_code="CODE3",
                 assignee="codex",
@@ -27,25 +28,30 @@ class ProgressTableTests(unittest.TestCase):
                 notes="angle weak labels",
             )
             rows = table.read_all()
+            db_rows = StateDb(Path(tmp) / "goods_marking.db").read_progress()
 
         self.assertEqual(rows[0]["outward_code"], "CODE3")
+        self.assertEqual(db_rows[0]["outward_code"], "CODE3")
         self.assertEqual(rows[0]["assignee"], "codex")
         self.assertEqual(rows[0]["status"], "selected")
         self.assertEqual(rows[0]["selected_count"], "40")
         self.assertEqual(rows[0]["needs_review"], "yes")
 
-    def test_progress_table_syncs_rows_to_sqlite_state_db(self):
+    def test_progress_table_updates_sqlite_without_writing_progress_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             progress_csv = Path(tmp) / "workflow_progress.csv"
             state_db = Path(tmp) / "goods_marking.db"
-            table = ProgressTable(progress_csv, state_db)
+            table = ProgressTable(state_db)
             table.upsert(outward_code="CODE3", status="selected", total_urls=42, selected_count=40)
 
-            rows = ProgressTable(progress_csv, state_db).read_all()
+            rows = ProgressTable(state_db).read_all()
+            db_rows = StateDb(state_db).read_progress()
 
         self.assertEqual(rows[0]["outward_code"], "CODE3")
+        self.assertEqual(db_rows[0]["outward_code"], "CODE3")
         self.assertEqual(rows[0]["status"], "selected")
         self.assertEqual(rows[0]["selected_count"], "40")
+        self.assertFalse(progress_csv.exists())
 
 
 class DownloadTests(unittest.TestCase):

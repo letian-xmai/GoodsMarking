@@ -4,9 +4,9 @@
 
 **Goal:** Add two workbench menus, `商品标注` and `商品统计`, with product-level annotation flow and per-product statistics.
 
-**Architecture:** Keep the existing standard-library HTTP workbench and extend `ReviewWorkbench` with product summary and product-specific batch operations. Persist `人工标注状态` in the local SQLite state database and keep CSV export compatibility.
+**Architecture:** Keep the existing standard-library HTTP workbench and extend `ReviewWorkbench` with product summary and product-specific batch operations. Persist `人工标注状态` in the local SQLite state database.
 
-**Tech Stack:** Python standard library, SQLite, existing CSV/XLSX compatibility helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
+**Tech Stack:** Python standard library, SQLite, existing CSV/XLSX migration helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
 
 ---
 

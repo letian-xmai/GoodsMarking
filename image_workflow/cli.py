@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
 import argparse
+import csv
 import sys
 
 from .downloader import download_group
@@ -12,7 +13,9 @@ from .full_evaluation import evaluate_full_testset
 from .group_index import build_group_index, iter_group_files, read_group_records
 from .progress import ProgressTable
 from .review_server import run_review_workbench
+from .review_workbench import STATUS_HEADER
 from .selection import select_downloaded_group
+from .state_db import StateDb
 from .training_set import build_training_dataset
 from .verification import verify_group
 
@@ -35,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         "build-training-set": command_build_training_set,
         "evaluate-full-testset": command_evaluate_full_testset,
         "review-workbench": command_review_workbench,
+        "migrate-state": command_migrate_state,
     }.get(args.command)
     if handler is not None:
         return handler(args)
@@ -47,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workbook", default=DEFAULT_XLSX)
     parser.add_argument("--original-dir", default="商品原始照片")
     parser.add_argument("--result-dir", default="商品标注结果")
-    parser.add_argument("--progress", default="workflow_progress.csv")
     parser.add_argument("--state-db", default=DEFAULT_STATE_DB)
     parser.add_argument("--target-count", type=int, default=40)
     sub = parser.add_subparsers(dest="command")
@@ -76,21 +79,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.set_defaults(preview=True)
     review = sub.add_parser("review-workbench")
     review.add_argument("--source-workbook", default="")
-    review.add_argument("--status-csv", default=DEFAULT_STATUS_CSV)
     review.add_argument("--state-db", default=DEFAULT_STATE_DB)
     review.add_argument("--result-dir", default="商品标注结果")
     review.add_argument("--host", default=DEFAULT_REVIEW_HOST)
     review.add_argument("--port", type=int, default=DEFAULT_REVIEW_PORT)
     review.add_argument("--batch-size", type=int, default=40)
+    migrate = sub.add_parser("migrate-state")
+    migrate.add_argument("--progress", default="workflow_progress.csv")
+    migrate.add_argument("--status-csv", default=DEFAULT_STATUS_CSV)
     return parser
 
 
 def command_inspect(args) -> int:
     summary = inspect_workbook(args.workbook)
-    ProgressTable(args.progress, args.state_db).initialize_pending(dict(summary.group_counts))
+    ProgressTable(args.state_db).initialize_pending(dict(summary.group_counts))
     print(f"total_urls={summary.total_urls}")
     print(f"group_count={len(summary.group_counts)}")
-    print(f"progress={Path(args.progress).resolve()}")
+    print(f"state_db={Path(args.state_db).resolve()}")
     return 0
 
 
@@ -99,7 +104,7 @@ def command_run_one(args) -> int:
     if not records:
         print(f"未找到 outward_code: {args.outward_code}", file=sys.stderr)
         return 1
-    report = process_group(records, Path(args.original_dir), Path(args.result_dir), ProgressTable(args.progress, args.state_db), args.target_count, args.download_workers)
+    report = process_group(records, Path(args.original_dir), Path(args.result_dir), ProgressTable(args.state_db), args.target_count, args.download_workers)
     print_group_report(report)
     return 0 if report["download_complete"] else 1
 
@@ -108,10 +113,10 @@ def command_run_full(args) -> int:
     if not args.confirmed:
         print("run-full 需要显式添加 --confirmed；请先用 run-one 确认试跑结果。", file=sys.stderr)
         return 2
-    progress = ProgressTable(args.progress, args.state_db)
+    progress = ProgressTable(args.state_db)
     index_dir = Path(args.index_dir)
     if args.rebuild_index or not (index_dir / "group_index.csv").exists():
-        summary = build_group_index(args.workbook, index_dir, args.progress, overwrite=args.rebuild_index)
+        summary = build_group_index(args.workbook, index_dir, args.state_db, overwrite=args.rebuild_index)
         print(f"index_built total_records={summary.total_records} group_count={summary.group_count}")
     files = iter_group_files(index_dir)
     if args.limit:
@@ -146,8 +151,32 @@ def command_evaluate_full_testset(args) -> int:
 
 def command_review_workbench(args) -> int:
     source_workbook = args.source_workbook or None
-    run_review_workbench(args.result_dir, source_workbook, args.status_csv, state_db=args.state_db, host=args.host, port=args.port, batch_size=args.batch_size)
+    run_review_workbench(args.result_dir, source_workbook, state_db=args.state_db, host=args.host, port=args.port, batch_size=args.batch_size)
     return 0
+
+
+def command_migrate_state(args) -> int:
+    db = StateDb(args.state_db)
+    progress_rows = _read_csv_rows(Path(args.progress), encoding="utf-8")
+    if progress_rows:
+        db.replace_progress(progress_rows)
+    status_updates = {}
+    for row in _read_csv_rows(Path(args.status_csv), encoding="utf-8-sig"):
+        outward_code = str(row.get("outward_code", "")).strip()
+        image_url = str(row.get("image_url", "")).strip()
+        status = str(row.get(STATUS_HEADER, "")).strip()
+        if outward_code and image_url:
+            status_updates[(outward_code, image_url)] = status
+    db.upsert_review_statuses(status_updates)
+    print(f"migrated_progress={len(progress_rows)} migrated_review_statuses={len(status_updates)} state_db={Path(args.state_db).resolve()}")
+    return 0
+
+
+def _read_csv_rows(path: Path, encoding: str) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with open(path, newline="", encoding=encoding) as handle:
+        return list(csv.DictReader(handle))
 
 
 def process_group(records, original_root: Path, result_root: Path, progress: ProgressTable, target_count: int, download_workers: int, progress_lock: Lock | None = None) -> dict:
