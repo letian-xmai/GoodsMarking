@@ -254,12 +254,14 @@ def _image_payload(item: ReviewImage, final_urls: set[str] | None = None) -> dic
 
 def _all_image_rows(workbench: ReviewWorkbench, state) -> list[dict[str, str]]:
     rows = []
+    live_statuses = _live_review_statuses(workbench, state)
     for product in state.products:
         product_dir = workbench.result_root / product.outward_code
         manifests = raw_manifest_rows(product_dir)
         model_by_source = model_statuses(product_dir)
         for item in product.raw_images:
             manifest = manifests.get(item.result_filename, {})
+            manual_status = live_statuses.get((item.outward_code, item.image_url), item.review_status)
             rows.append({
                 "review_id": item.review_id,
                 "outward_code": item.outward_code,
@@ -267,11 +269,23 @@ def _all_image_rows(workbench: ReviewWorkbench, state) -> list[dict[str, str]]:
                 "image_url": item.image_url,
                 "download_status": manifest.get("status", ""),
                 "model_status": model_by_source.get(item.result_filename, "未处理"),
-                "manual_status": item.review_status or "未标注",
+                "manual_status": manual_status or "未标注",
                 "image_src": f"/image/{item.review_id}",
             })
     rows.sort(key=lambda row: (row["outward_code"], row["result_filename"]))
     return rows
+
+
+def _live_review_statuses(workbench: ReviewWorkbench, state) -> dict[tuple[str, str], str]:
+    if not workbench.state_db:
+        return {}
+    keys = {
+        (image.outward_code, image.image_url)
+        for product in state.products
+        for image in product.raw_images
+        if image.image_url
+    }
+    return workbench.state_db.read_review_statuses(keys)
 
 
 def _int_param(params: dict[str, list[str]], key: str, default: int) -> int:

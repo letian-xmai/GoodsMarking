@@ -947,6 +947,37 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual(len(second["images"]), 1)
         self.assertEqual(first["pagination"]["total_pages"], 2)
 
+    def test_images_payload_uses_latest_sqlite_review_statuses_for_filtering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_db = root / "goods_marking.db"
+            result_root = root / "商品标注结果"
+            write_raw_images(
+                result_root,
+                "CODE1",
+                [
+                    {"url": "http://example.com/a.jpg", "filename": "a.jpg"},
+                    {"url": "http://example.com/b.jpg", "filename": "b.jpg"},
+                ],
+            )
+            db = StateDb(state_db)
+            db.upsert_product_images([
+                {"outward_code": "CODE1", "image_url": "http://example.com/a.jpg", "source": "cutout", "row_number": "1"},
+                {"outward_code": "CODE1", "image_url": "http://example.com/b.jpg", "source": "cutout", "row_number": "2"},
+            ])
+            workbench = ReviewWorkbench(result_root, state_db=state_db)
+            workbench.current_state()
+            db.upsert_review_statuses({
+                ("CODE1", "http://example.com/a.jpg"): "合格",
+                ("CODE1", "http://example.com/b.jpg"): "合格",
+            })
+
+            payload = _images_payload(workbench, query="CODE1", filter_by="qualified")
+
+        self.assertEqual(payload["image_metrics"]["qualified_images"], 2)
+        self.assertEqual(payload["pagination"]["total"], 2)
+        self.assertEqual([row["manual_status"] for row in payload["images"]], ["合格", "合格"])
+
     def test_batch_payload_includes_current_product_status_and_original_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
