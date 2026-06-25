@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local data exports and mutable workflow state
+*.xlsx
+*.xls
+*.csv
+*.tsv
+
+# Generated image workflow outputs and caches
+商品标注结果/
+商品原始照片/
+模型训练数据/
+migration_reports/
+.image_workflow_cache/
+
+# Generated reports and media
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.jsonl
