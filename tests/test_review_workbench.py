@@ -1128,6 +1128,15 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn(".statPill:last-child{border-right:0}", _HTML)
         self.assertIn("finalStats.style.display=activeView==='final'?'inline-flex':'none'", _HTML)
 
+    def test_workbench_html_has_original_image_stats(self):
+        self.assertIn('id="rawStats"', _HTML)
+        self.assertIn('id="rawImageCount"', _HTML)
+        self.assertIn('id="rawPendingConfirmCount"', _HTML)
+        self.assertIn("合格待确认", _HTML)
+        self.assertIn("rawStats.style.display=activeView==='original'?'inline-flex':'none'", _HTML)
+        self.assertIn("rawImageCount.textContent=rawImages.length", _HTML)
+        self.assertIn("rawPendingConfirmCount.textContent=document.querySelectorAll('.raw-card.pending-valid').length", _HTML)
+
     def test_workbench_html_supports_original_image_status_adjustments(self):
         self.assertIn("rawAdjustments", _HTML)
         self.assertIn("toggleRawStatus", _HTML)
