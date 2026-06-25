@@ -1018,6 +1018,11 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertNotIn("<select data-id=", _HTML)
 
     def test_workbench_html_has_product_annotation_and_stats_menus(self):
+        self.assertIn('class="appnav"', _HTML)
+        self.assertIn("商品标注审核工作台", _HTML)
+        self.assertIn('aria-label="主导航"', _HTML)
+        self.assertLess(_HTML.index('class="brand"'), _HTML.index('aria-label="主导航"'))
+        self.assertLess(_HTML.index('aria-label="主导航"'), _HTML.index('class="navmeta"'))
         self.assertIn("商品标注", _HTML)
         self.assertIn("商品统计", _HTML)
         self.assertIn("全部图片", _HTML)
@@ -1054,6 +1059,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn("全部图片数", _HTML)
         self.assertIn("模型最终结果数", _HTML)
         self.assertIn("合格数", _HTML)
+        self.assertLess(_HTML.index('id="imageMetrics"'), _HTML.index('id="imageTools"'))
+        self.assertIn("#imageMetrics{margin-top:14px}#imageTools{margin-top:18px}", _HTML)
         self.assertIn("renderImageMetrics", _HTML)
         self.assertIn("setImageFilter('model_final')", _HTML)
         self.assertIn("setImageFilter('qualified')", _HTML)
@@ -1096,6 +1103,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('left:50%', _HTML)
         self.assertIn('transform:translateX(-50%)', _HTML)
         self.assertIn('padding-bottom:104px', _HTML)
+        self.assertNotIn("backdrop-filter", _HTML)
+        self.assertIn("grid-template-columns:minmax(240px,1fr) auto minmax(160px,1fr)", _HTML)
 
 
 if __name__ == "__main__":
