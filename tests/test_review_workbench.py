@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 import image_workflow.review_workbench as review_workbench_module
 from image_workflow.review_workbench import ReviewState, ReviewWorkbench, apply_review_statuses, read_review_statuses
 from image_workflow.review_xlsx import read_workbook_product_summary
-from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATUS_CSV, build_parser
+from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATE_DB, DEFAULT_STATUS_CSV, build_parser
 from image_workflow.review_server import _HTML, _batch_payload, _product_payload, _products_payload
 
 
@@ -261,6 +261,47 @@ class ReviewWorkbenchTests(unittest.TestCase):
             "http://example.com/a.jpg": "合格",
             "http://example.com/b.jpg": "不合格",
         })
+
+    def test_review_workbench_syncs_manual_statuses_to_sqlite_state_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result_root = root / "商品标注结果"
+            status_csv = root / "manual_status.csv"
+            state_db = root / "goods_marking.db"
+            write_product_result(
+                result_root,
+                "CODE1",
+                [
+                    {"url": "http://example.com/a.jpg", "source_name": "r000002__cutout__aaaa.jpg", "result_filename": "01_front_label__001__r000002__cutout__aaaa.jpg"},
+                ],
+            )
+
+            workbench = ReviewWorkbench(result_root, status_file=status_csv, state_db=state_db, batch_size=20)
+            image = workbench.build_state().products[0].images[0]
+            workbench.submit_product_statuses({image.review_id: "合格"})
+            reloaded = ReviewWorkbench(result_root, status_file=status_csv, state_db=state_db, batch_size=20).build_state()
+
+        self.assertEqual(reloaded.products[0].images[0].review_status, "合格")
+
+    def test_review_workbench_can_use_sqlite_state_db_without_csv_status_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result_root = root / "商品标注结果"
+            state_db = root / "goods_marking.db"
+            write_product_result(
+                result_root,
+                "CODE1",
+                [
+                    {"url": "http://example.com/a.jpg", "source_name": "r000002__cutout__aaaa.jpg", "result_filename": "01_front_label__001__r000002__cutout__aaaa.jpg"},
+                ],
+            )
+
+            workbench = ReviewWorkbench(result_root, status_file=None, state_db=state_db, batch_size=20)
+            image = workbench.build_state().products[0].images[0]
+            workbench.submit_product_statuses({image.review_id: "不合格"})
+            reloaded = ReviewWorkbench(result_root, status_file=None, state_db=state_db, batch_size=20).build_state()
+
+        self.assertEqual(reloaded.products[0].images[0].review_status, "不合格")
 
     def test_all_standard_product_is_invalid_even_when_urls_do_not_contain_standard(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -847,6 +888,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
             "source.xlsx",
             "--status-csv",
             "status.csv",
+            "--state-db",
+            "state.db",
             "--result-dir",
             "商品标注结果",
             "--port",
@@ -858,6 +901,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual(args.command, "review-workbench")
         self.assertEqual(args.source_workbook, "source.xlsx")
         self.assertEqual(args.status_csv, "status.csv")
+        self.assertEqual(args.state_db, "state.db")
         self.assertEqual(args.result_dir, "商品标注结果")
         self.assertEqual(args.port, 8999)
         self.assertEqual(args.batch_size, 12)
@@ -867,6 +911,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
 
         self.assertEqual(args.source_workbook, "")
         self.assertEqual(args.status_csv, DEFAULT_STATUS_CSV)
+        self.assertEqual(args.state_db, DEFAULT_STATE_DB)
 
     def test_workbench_html_toggles_invalid_checkbox_when_image_clicked(self):
         self.assertIn("review-image", _HTML)

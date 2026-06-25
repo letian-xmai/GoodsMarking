@@ -9,6 +9,7 @@ import hashlib
 import shutil
 
 from .review_xlsx import WorkbookProductSummary, apply_review_statuses, read_review_statuses as read_xlsx_review_statuses, read_workbook_product_summary
+from .state_db import StateDb
 
 
 VALID_STATUS = "合格"
@@ -49,10 +50,11 @@ class ReviewState:
 
 
 class ReviewWorkbench:
-    def __init__(self, result_root: str | Path, workbook: str | Path | None = None, batch_size: int = 40, status_file: str | Path | None = None):
+    def __init__(self, result_root: str | Path, workbook: str | Path | None = None, batch_size: int = 40, status_file: str | Path | None = None, state_db: str | Path | None = None):
         self.result_root = Path(result_root)
         self.workbook = Path(workbook) if workbook else None
         self.status_file = Path(status_file) if status_file else self.workbook
+        self.state_db = StateDb(state_db) if state_db else None
         self.batch_size = batch_size
         self._state: ReviewState | None = None
         self._state_lock = Lock()
@@ -134,6 +136,8 @@ class ReviewWorkbench:
             if image.image_url
         }
         statuses = read_review_statuses(self.status_file, keys) if self.status_file else {}
+        if self.state_db:
+            statuses.update(self.state_db.read_review_statuses(keys))
         image_by_id: dict[str, ReviewImage] = {}
         for product in products:
             for image in [*product.images, *product.raw_images]:
@@ -190,7 +194,10 @@ class ReviewWorkbench:
                 status = INVALID_STATUS if review_id in invalid_ids else VALID_STATUS
                 updates[(image.outward_code, image.image_url)] = status
                 image_updates.append((image, status))
-            _append_review_statuses(self.status_file, updates)
+            if self.status_file:
+                _append_review_statuses(self.status_file, updates)
+            if self.state_db:
+                self.state_db.upsert_review_statuses(updates)
             for image, status in image_updates:
                 image.review_status = status
             state.metrics = _metrics(state.products, state.product_codes, state.invalid_product_codes)
@@ -208,7 +215,10 @@ class ReviewWorkbench:
                     continue
                 updates[(image.outward_code, image.image_url)] = clean_status
                 image_updates.append((image, clean_status))
-            _append_review_statuses(self.status_file, updates)
+            if self.status_file:
+                _append_review_statuses(self.status_file, updates)
+            if self.state_db:
+                self.state_db.upsert_review_statuses(updates)
             product_by_code = {product.outward_code: product for product in state.products}
             for image, status in image_updates:
                 image.review_status = status

@@ -34,6 +34,19 @@ class ProgressTableTests(unittest.TestCase):
         self.assertEqual(rows[0]["selected_count"], "40")
         self.assertEqual(rows[0]["needs_review"], "yes")
 
+    def test_progress_table_syncs_rows_to_sqlite_state_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            progress_csv = Path(tmp) / "workflow_progress.csv"
+            state_db = Path(tmp) / "goods_marking.db"
+            table = ProgressTable(progress_csv, state_db)
+            table.upsert(outward_code="CODE3", status="selected", total_urls=42, selected_count=40)
+
+            rows = ProgressTable(progress_csv, state_db).read_all()
+
+        self.assertEqual(rows[0]["outward_code"], "CODE3")
+        self.assertEqual(rows[0]["status"], "selected")
+        self.assertEqual(rows[0]["selected_count"], "40")
+
 
 class DownloadTests(unittest.TestCase):
     def test_download_group_writes_manifest_and_skips_existing_files(self):

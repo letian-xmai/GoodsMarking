@@ -7,6 +7,9 @@ __pycache__/
 *.xls
 *.csv
 *.tsv
+*.db
+*.db-shm
+*.db-wal
 
 # Generated image workflow outputs and caches
 商品标注结果/

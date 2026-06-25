@@ -11,6 +11,7 @@
 ```bash
 /Users/henry/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m image_workflow.cli review-workbench \
   --status-csv 2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv \
+  --state-db goods_marking.db \
   --result-dir 商品标注结果
 ```
 
@@ -19,4 +20,5 @@
 - 启动前先检查 `8765` 是否已有 `review-workbench` 进程在监听。
 - 如果是旧的调试进程，先停止旧进程，再启动新进程。
 - 默认不扫描大型 Excel；需要全量商品统计时才追加 `--source-workbook 2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0.xlsx`。
+- 本地状态默认写入 `goods_marking.db`，同时保留 CSV 作为导出和兼容文件。
 - 页面首次打开时允许显示“数据加载中”，等待后台加载完成。

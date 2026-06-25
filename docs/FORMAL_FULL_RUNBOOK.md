@@ -15,10 +15,11 @@
 | 用途 | 路径 |
 | --- | --- |
 | 源 Excel | `2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0.xlsx` |
+| 本地状态库 | `goods_marking.db` |
 | 人工状态 CSV | `2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv` |
 | 模型文件 | `模型训练数据/model/annotation_model.json` |
 | 正式结果根目录 | `商品标注结果/` |
-| 全局进度表 | `workflow_progress.csv` |
+| 全局进度导出 CSV | `workflow_progress.csv` |
 | 当前 100 商品汇总 | `商品标注结果/formal_100_summary_20260624_222420.csv` |
 | 阈值说明 | `阈值配置手册.md` |
 | 工作台服务 | `image_workflow/review_server.py` |
@@ -170,13 +171,13 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 
 工作台规则：
 
-- 默认不扫描 XLSX，顶部指标从结果目录和人工状态 CSV 汇总；显式传入 `--source-workbook` 时才读取源 Excel 做全量商品统计。
+- 默认不扫描 XLSX，顶部指标从结果目录、`goods_marking.db` 和人工状态 CSV 汇总；显式传入 `--source-workbook` 时才读取源 Excel 做全量商品统计。
 - 商品默认展示模型最终结果。
 - 模型最终结果页默认状态为合格；勾选后表示不合格；提交本商品后，该商品标记完成。
 - 商品原始照片页展示全部原图状态：`未标注`、`合格`、`不合格`、`合格待确认`。
 - 原图若已在 `最终结果/` 且没有人工标注状态，显示 `合格待确认`，样式需与其他图片区分。
 - 原图点击切换规则：`未标注/不合格 -> 合格`，`合格/合格待确认 -> 不合格`。
-- 人工状态只写入人工状态 CSV 的 `人工标注状态` 字段，不再写状态 XLSX。
+- 人工状态写入 `goods_marking.db`，并同步追加到人工状态 CSV 的 `人工标注状态` 字段；不再写状态 XLSX。
 - 服务默认只扫描结果目录和 CSV；只有显式传入 `--source-workbook` 时才会扫描较大的源 Excel。
 
 ## 8. 全量执行前检查清单
@@ -184,11 +185,11 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 1. 当前目录是 `/Users/henry/Documents/商品标注`。
 2. 模型文件存在：`模型训练数据/model/annotation_model.json`。
 3. 源 Excel 存在；人工状态 CSV 存在或可由工作台首次提交时创建。
-4. `workflow_progress.csv` 能正常读取，没有 NUL 字符。
+4. `goods_marking.db` 可写；`workflow_progress.csv` 仅作为进度导出/兼容文件读取。
 5. `商品标注结果/bak/` 有足够磁盘空间容纳重跑备份。
 6. 确认 runner 调用的是 `process_formal_group()`。
 7. 先跑 1 到 3 个 `pending` 商品检查目录结构和报告，再扩大到全量。
-8. 全量期间不要同时启动多个会写 `workflow_progress.csv` 的任务。
+8. 全量期间不要同时启动多个会写本地状态库和进度 CSV 的任务。
 
 ## 9. 新会话启动提示
 
@@ -198,7 +199,7 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 2. 阅读本文档、`image_workflow/formal_workflow.py`、`workflow_progress.csv`、`商品标注结果/formal_100_summary_20260624_222420.csv`。
 3. 确认当前 100 商品是否仍是最新基线。
 4. 如需全量执行，先补齐正式 formal runner 或 CLI 命令，再从 `workflow_progress.csv` 的 `pending` 商品续跑。
-5. 跑完一批后用工作台人工复核，并将人工状态写回人工状态 CSV。
+5. 跑完一批后用工作台人工复核，并将人工状态写回 `goods_marking.db`，同时保留人工状态 CSV 导出。
 
 ## 10. 验证命令
 

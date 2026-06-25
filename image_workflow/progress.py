@@ -4,6 +4,8 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .state_db import StateDb
+
 
 FIELDS = [
     "outward_code",
@@ -20,10 +22,15 @@ FIELDS = [
 
 
 class ProgressTable:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, state_db: str | Path | None = None):
         self.path = Path(path)
+        self.state_db = StateDb(state_db) if state_db else None
 
     def read_all(self) -> list[dict[str, str]]:
+        if self.state_db and self.state_db.path.exists():
+            rows = self.state_db.read_progress()
+            if rows:
+                return rows
         if not self.path.exists():
             return []
         with open(self.path, newline="", encoding="utf-8") as handle:
@@ -64,6 +71,8 @@ class ProgressTable:
         if not replaced:
             rows.append(next_row)
         self._write(rows)
+        if self.state_db:
+            self.state_db.upsert_progress(next_row)
 
     def initialize_pending(self, group_counts: dict[str, int], assignee: str = "codex") -> None:
         rows = []
@@ -82,6 +91,8 @@ class ProgressTable:
                 "notes": "",
             })
         self._write(rows)
+        if self.state_db:
+            self.state_db.replace_progress(rows)
 
     def _write(self, rows: list[dict[str, str]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

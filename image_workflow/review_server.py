@@ -9,8 +9,8 @@ import mimetypes
 from .review_workbench import ReviewImage, ReviewProduct, ReviewWorkbench, product_status
 
 
-def run_review_workbench(result_dir: str | Path, workbook: str | Path | None, status_file: str | Path | None = None, host: str = "127.0.0.1", port: int = 8765, batch_size: int = 40) -> None:
-    workbench = ReviewWorkbench(result_dir, workbook, batch_size=batch_size, status_file=status_file)
+def run_review_workbench(result_dir: str | Path, workbook: str | Path | None, status_file: str | Path | None = None, state_db: str | Path | None = None, host: str = "127.0.0.1", port: int = 8765, batch_size: int = 40) -> None:
+    workbench = ReviewWorkbench(result_dir, workbook, batch_size=batch_size, status_file=status_file, state_db=state_db)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:

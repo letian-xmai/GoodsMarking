@@ -4,9 +4,9 @@
 
 **Goal:** Add two workbench menus, `商品标注` and `商品统计`, with product-level annotation flow and per-product statistics.
 
-**Architecture:** Keep the existing standard-library HTTP workbench and extend `ReviewWorkbench` with product summary and product-specific batch operations. Reuse the status workbook read/write path so `人工标注状态` remains the single persisted manual review field.
+**Architecture:** Keep the existing standard-library HTTP workbench and extend `ReviewWorkbench` with product summary and product-specific batch operations. Persist `人工标注状态` in the local SQLite state database and keep CSV export compatibility.
 
-**Tech Stack:** Python standard library, existing XLSX ZIP/XML helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
+**Tech Stack:** Python standard library, SQLite, existing CSV/XLSX compatibility helpers, existing `商品标注结果/{outward_code}/最终结果` artifacts.
 
 ---
 
@@ -16,8 +16,8 @@
 - Modify: `tests/test_review_workbench.py`
 - Modify: `image_workflow/review_workbench.py`
 
-- [ ] Add tests for per-product summary rows, including `standard` vs non-`standard` URL counts from the status workbook.
-- [ ] Add summary dataclass and workbook URL classification logic.
+- [ ] Add tests for per-product summary rows, including optional `standard` vs non-`standard` URL counts from the source workbook.
+- [ ] Add summary dataclass and source workbook URL classification logic.
 - [ ] Run `python3 -m unittest tests.test_review_workbench`.
 
 ### Task 2: Product-Level Annotation Flow

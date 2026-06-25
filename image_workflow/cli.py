@@ -19,6 +19,7 @@ from .verification import verify_group
 
 DEFAULT_XLSX = "2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0.xlsx"
 DEFAULT_STATUS_CSV = "2026-06-23-20-22-38_EXPORT_XLSX_26258034_453_0_带处理进度_人工标注状态.csv"
+DEFAULT_STATE_DB = "goods_marking.db"
 DEFAULT_REVIEW_HOST = "127.0.0.1"
 DEFAULT_REVIEW_PORT = 8765
 
@@ -47,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--original-dir", default="商品原始照片")
     parser.add_argument("--result-dir", default="商品标注结果")
     parser.add_argument("--progress", default="workflow_progress.csv")
+    parser.add_argument("--state-db", default=DEFAULT_STATE_DB)
     parser.add_argument("--target-count", type=int, default=40)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("inspect")
@@ -75,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = sub.add_parser("review-workbench")
     review.add_argument("--source-workbook", default="")
     review.add_argument("--status-csv", default=DEFAULT_STATUS_CSV)
+    review.add_argument("--state-db", default=DEFAULT_STATE_DB)
     review.add_argument("--result-dir", default="商品标注结果")
     review.add_argument("--host", default=DEFAULT_REVIEW_HOST)
     review.add_argument("--port", type=int, default=DEFAULT_REVIEW_PORT)
@@ -84,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_inspect(args) -> int:
     summary = inspect_workbook(args.workbook)
-    ProgressTable(args.progress).initialize_pending(dict(summary.group_counts))
+    ProgressTable(args.progress, args.state_db).initialize_pending(dict(summary.group_counts))
     print(f"total_urls={summary.total_urls}")
     print(f"group_count={len(summary.group_counts)}")
     print(f"progress={Path(args.progress).resolve()}")
@@ -96,7 +99,7 @@ def command_run_one(args) -> int:
     if not records:
         print(f"未找到 outward_code: {args.outward_code}", file=sys.stderr)
         return 1
-    report = process_group(records, Path(args.original_dir), Path(args.result_dir), ProgressTable(args.progress), args.target_count, args.download_workers)
+    report = process_group(records, Path(args.original_dir), Path(args.result_dir), ProgressTable(args.progress, args.state_db), args.target_count, args.download_workers)
     print_group_report(report)
     return 0 if report["download_complete"] else 1
 
@@ -105,7 +108,7 @@ def command_run_full(args) -> int:
     if not args.confirmed:
         print("run-full 需要显式添加 --confirmed；请先用 run-one 确认试跑结果。", file=sys.stderr)
         return 2
-    progress = ProgressTable(args.progress)
+    progress = ProgressTable(args.progress, args.state_db)
     index_dir = Path(args.index_dir)
     if args.rebuild_index or not (index_dir / "group_index.csv").exists():
         summary = build_group_index(args.workbook, index_dir, args.progress, overwrite=args.rebuild_index)
@@ -143,7 +146,7 @@ def command_evaluate_full_testset(args) -> int:
 
 def command_review_workbench(args) -> int:
     source_workbook = args.source_workbook or None
-    run_review_workbench(args.result_dir, source_workbook, args.status_csv, host=args.host, port=args.port, batch_size=args.batch_size)
+    run_review_workbench(args.result_dir, source_workbook, args.status_csv, state_db=args.state_db, host=args.host, port=args.port, batch_size=args.batch_size)
     return 0
 
 
