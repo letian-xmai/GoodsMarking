@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Iterable
 import sqlite3
 
 
@@ -88,6 +89,128 @@ class StateDb:
                         (outward_code, image_url),
                     )
 
+    def upsert_product_images(self, rows: Iterable[dict[str, str]]) -> None:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            for row in rows:
+                outward_code = str(row.get("outward_code", "")).strip()
+                image_url = str(row.get("image_url", "")).strip()
+                if not outward_code or not image_url:
+                    continue
+                source = str(row.get("source", "")).strip()
+                row_number = _int_value(row.get("row_number", "0"))
+                conn.execute(
+                    """
+                    INSERT INTO product_images(outward_code, image_url, source, row_number, is_standard)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(outward_code, image_url) DO UPDATE SET
+                        source = excluded.source,
+                        row_number = excluded.row_number,
+                        is_standard = excluded.is_standard,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (outward_code, image_url, source, row_number, 1 if _is_standard_image(image_url, source) else 0),
+                )
+
+    def first_standard_image_urls(self, outward_codes: set[str]) -> dict[str, str]:
+        params = sorted(outward_codes)
+        where = ""
+        if 0 < len(params) <= 900:
+            placeholders = ",".join("?" for _ in params)
+            where = f"AND outward_code IN ({placeholders})"
+        else:
+            params = []
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT p.outward_code, MIN(p.image_url) AS image_url
+                FROM product_images p
+                JOIN (
+                    SELECT outward_code, MIN(row_number) AS first_row
+                    FROM product_images
+                    WHERE is_standard = 1 {where}
+                    GROUP BY outward_code
+                ) first
+                  ON p.outward_code = first.outward_code
+                 AND p.row_number = first.first_row
+                WHERE p.is_standard = 1
+                GROUP BY p.outward_code
+                ORDER BY p.outward_code
+                """,
+                params,
+            ).fetchall()
+        urls: dict[str, str] = {}
+        for row in rows:
+            urls.setdefault(str(row["outward_code"]), str(row["image_url"]))
+        return urls
+
+    def product_image_summary(self) -> dict[str, object]:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            image_rows = conn.execute(
+                """
+                SELECT outward_code,
+                       COUNT(*) AS total_count,
+                       SUM(CASE WHEN is_standard = 1 THEN 1 ELSE 0 END) AS standard_count
+                FROM product_images
+                GROUP BY outward_code
+                """
+            ).fetchall()
+            progress_rows = conn.execute("SELECT outward_code FROM product_progress").fetchall()
+        product_codes = {str(row["outward_code"]) for row in progress_rows}
+        standard_counts: dict[str, int] = {}
+        cutout_counts: dict[str, int] = {}
+        all_standard_product_codes: set[str] = set()
+        for row in image_rows:
+            code = str(row["outward_code"])
+            total_count = int(row["total_count"] or 0)
+            standard_count = int(row["standard_count"] or 0)
+            product_codes.add(code)
+            standard_counts[code] = standard_count
+            cutout_counts[code] = max(0, total_count - standard_count)
+            if total_count > 0 and standard_count == total_count:
+                all_standard_product_codes.add(code)
+        for code in product_codes:
+            standard_counts.setdefault(code, 0)
+            cutout_counts.setdefault(code, 0)
+        return {
+            "product_codes": product_codes,
+            "all_standard_product_codes": all_standard_product_codes,
+            "standard_counts": standard_counts,
+            "cutout_counts": cutout_counts,
+        }
+
+    def count_product_images(self, outward_code: str = "") -> int:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            if outward_code:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM product_images WHERE outward_code = ?",
+                    (outward_code,),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS count FROM product_images").fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def count_review_status(self, manual_status: str, outward_code: str = "") -> int:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            if outward_code:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM image_review_status
+                    WHERE manual_status = ? AND outward_code = ?
+                    """,
+                    (manual_status, outward_code),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM image_review_status WHERE manual_status = ?",
+                    (manual_status,),
+                ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
@@ -109,6 +232,25 @@ class StateDb:
                 updated_at TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT ''
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_images (
+                outward_code TEXT NOT NULL,
+                image_url TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                row_number INTEGER NOT NULL DEFAULT 0,
+                is_standard INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(outward_code, image_url)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_product_images_standard
+            ON product_images(is_standard, outward_code, row_number, image_url)
             """
         )
         conn.execute(
@@ -148,3 +290,19 @@ class StateDb:
             """,
             values,
         )
+
+
+def _is_standard_image(image_url: str, source: str) -> bool:
+    source_value = source.strip().lower()
+    if "standard" in source_value:
+        return True
+    if "cutout" in source_value:
+        return False
+    return "standard" in image_url.lower()
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError:
+        return 0

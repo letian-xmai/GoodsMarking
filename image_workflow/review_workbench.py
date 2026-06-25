@@ -8,7 +8,7 @@ import csv
 import hashlib
 import shutil
 
-from .review_xlsx import WorkbookProductSummary, read_review_statuses as read_xlsx_review_statuses, read_workbook_product_summary
+from .review_xlsx import read_review_statuses as read_xlsx_review_statuses
 from .state_db import StateDb
 
 
@@ -46,14 +46,13 @@ class ReviewState:
     image_by_id: dict[str, ReviewImage]
     product_codes: set[str]
     invalid_product_codes: set[str]
-    workbook_summary: WorkbookProductSummary | None
+    standard_counts: dict[str, int]
+    cutout_counts: dict[str, int]
 
 
 class ReviewWorkbench:
     def __init__(self, result_root: str | Path, workbook: str | Path | None = None, batch_size: int = 40, status_file: str | Path | None = None, state_db: str | Path | None = None):
         self.result_root = Path(result_root)
-        self.workbook = Path(workbook) if workbook else None
-        self.status_file = Path(status_file) if status_file else self.workbook
         self.state_db = StateDb(state_db) if state_db else None
         self.batch_size = batch_size
         self._state: ReviewState | None = None
@@ -123,9 +122,9 @@ class ReviewWorkbench:
             self._load_done.set()
 
     def build_state(self) -> ReviewState:
-        summary = read_workbook_product_summary(self.workbook) if self.workbook and self.workbook.exists() else None
-        product_codes = summary.product_codes if summary else set()
-        invalid_product_codes = summary.all_standard_product_codes if summary else set()
+        summary = self.state_db.product_image_summary() if self.state_db else _empty_product_summary()
+        product_codes = set(summary["product_codes"])
+        invalid_product_codes = set(summary["all_standard_product_codes"])
         products = self._scan_products()
         if product_codes:
             products = [product for product in products if product.outward_code in product_codes]
@@ -135,15 +134,21 @@ class ReviewWorkbench:
             for image in [*product.images, *product.raw_images]
             if image.image_url
         }
-        statuses = read_review_statuses(self.status_file, keys) if self.status_file else {}
-        if self.state_db:
-            statuses.update(self.state_db.read_review_statuses(keys))
+        statuses = self.state_db.read_review_statuses(keys) if self.state_db else {}
         image_by_id: dict[str, ReviewImage] = {}
         for product in products:
             for image in [*product.images, *product.raw_images]:
                 image.review_status = statuses.get((image.outward_code, image.image_url), "")
                 image_by_id[image.review_id] = image
-        return ReviewState(products, _metrics(products, product_codes, invalid_product_codes), image_by_id, product_codes, invalid_product_codes, summary)
+        return ReviewState(
+            products,
+            _metrics(products, product_codes, invalid_product_codes),
+            image_by_id,
+            product_codes,
+            invalid_product_codes,
+            dict(summary["standard_counts"]),
+            dict(summary["cutout_counts"]),
+        )
 
     def next_batch(self, state: ReviewState | None = None) -> list[ReviewImage]:
         state = state or self.current_state()
@@ -167,14 +172,16 @@ class ReviewWorkbench:
         state = self.current_state()
         product_by_code = {product.outward_code: product for product in state.products}
         codes = sorted(state.product_codes or set(product_by_code))
+        standard_image_urls = self.state_db.first_standard_image_urls(set(codes)) if self.state_db else {}
         rows = []
         for code in codes:
             product = product_by_code.get(code)
             images = [] if product is None else product.images
             rows.append({
                 "outward_code": code,
-                "standard_count": _workbook_count(state.workbook_summary, "standard", code),
-                "cutout_count": _workbook_count(state.workbook_summary, "cutout", code),
+                "standard_image_url": standard_image_urls.get(code, ""),
+                "standard_count": state.standard_counts.get(code, 0),
+                "cutout_count": state.cutout_counts.get(code, 0),
                 "final_count": len(images),
                 "manual_count": sum(1 for image in images if image.review_status == VALID_STATUS),
                 "status": product_summary_status(product, code in state.invalid_product_codes),
@@ -456,9 +463,10 @@ def _is_review_invalid(product: ReviewProduct) -> bool:
     return all(image.review_status in REVIEWED_STATUSES for image in product.images) and all(image.review_status == INVALID_STATUS for image in product.images)
 
 
-def _workbook_count(summary: WorkbookProductSummary | None, count_type: str, code: str) -> int:
-    if summary is None:
-        return 0
-    if count_type == "standard":
-        return summary.standard_counts.get(code, 0)
-    return summary.cutout_counts.get(code, 0)
+def _empty_product_summary() -> dict[str, object]:
+    return {
+        "product_codes": set(),
+        "all_standard_product_codes": set(),
+        "standard_counts": {},
+        "cutout_counts": {},
+    }

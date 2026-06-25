@@ -8,7 +8,7 @@ import csv
 import sys
 
 from .downloader import download_group
-from .excel_reader import inspect_workbook, records_for_group
+from .excel_reader import inspect_workbook, iter_excel_records, records_for_group
 from .full_evaluation import evaluate_full_testset
 from .group_index import build_group_index, iter_group_files, read_group_records
 from .progress import ProgressTable
@@ -87,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = sub.add_parser("migrate-state")
     migrate.add_argument("--progress", default="workflow_progress.csv")
     migrate.add_argument("--status-csv", default=DEFAULT_STATUS_CSV)
+    migrate.add_argument("--source-workbook", default="")
     return parser
 
 
@@ -150,13 +151,26 @@ def command_evaluate_full_testset(args) -> int:
 
 
 def command_review_workbench(args) -> int:
-    source_workbook = args.source_workbook or None
-    run_review_workbench(args.result_dir, source_workbook, state_db=args.state_db, host=args.host, port=args.port, batch_size=args.batch_size)
+    run_review_workbench(args.result_dir, None, state_db=args.state_db, host=args.host, port=args.port, batch_size=args.batch_size)
     return 0
 
 
 def command_migrate_state(args) -> int:
     db = StateDb(args.state_db)
+    source_count = 0
+    if args.source_workbook:
+        def source_rows():
+            nonlocal source_count
+            for record in iter_excel_records(args.source_workbook):
+                source_count += 1
+                yield {
+                    "outward_code": record.outward_code,
+                    "image_url": record.image_url,
+                    "source": record.source,
+                    "row_number": str(record.row_number),
+                }
+
+        db.upsert_product_images(source_rows())
     progress_rows = _read_csv_rows(Path(args.progress), encoding="utf-8")
     if progress_rows:
         db.replace_progress(progress_rows)
@@ -168,7 +182,7 @@ def command_migrate_state(args) -> int:
         if outward_code and image_url:
             status_updates[(outward_code, image_url)] = status
     db.upsert_review_statuses(status_updates)
-    print(f"migrated_progress={len(progress_rows)} migrated_review_statuses={len(status_updates)} state_db={Path(args.state_db).resolve()}")
+    print(f"migrated_source_images={source_count} migrated_progress={len(progress_rows)} migrated_review_statuses={len(status_updates)} state_db={Path(args.state_db).resolve()}")
     return 0
 
 

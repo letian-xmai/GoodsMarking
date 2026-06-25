@@ -12,7 +12,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from image_workflow.review_workbench import ReviewState, ReviewWorkbench, read_review_statuses
+from image_workflow.review_workbench import ReviewState, ReviewWorkbench
 from image_workflow.review_xlsx import read_workbook_product_summary
 from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATE_DB, build_parser
 from image_workflow.review_server import _HTML, _batch_payload, _images_payload, _product_payload, _products_payload
@@ -43,6 +43,29 @@ def write_status_workbook(path, rows):
                 + "</sheetData></worksheet>"
             ),
         )
+
+
+def seed_state_db_from_workbook_rows(path, rows):
+    db = StateDb(path)
+    image_rows = []
+    status_updates = {}
+    for row_number, values in rows:
+        if not values or values[0] == "outward_code":
+            continue
+        outward_code = values[0]
+        image_url = values[1] if len(values) > 1 else ""
+        source = values[2] if len(values) > 2 else ""
+        if outward_code and image_url:
+            image_rows.append({
+                "outward_code": outward_code,
+                "image_url": image_url,
+                "source": source,
+                "row_number": str(row_number),
+            })
+        if len(values) > 5 and values[5]:
+            status_updates[(outward_code, image_url)] = values[5]
+    db.upsert_product_images(image_rows)
+    db.upsert_review_statuses(status_updates)
 
 
 def write_status_csv(path, rows):
@@ -157,11 +180,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 self.release.wait(2)
                 return ReviewState(
                     [],
-                    {"total_products": 0, "completed_products": 0, "invalid_products": 0, "unfinished_products": 0},
+                    {"total_products": 0, "completed_products": 0, "invalid_products": 0, "pending_annotation_products": 0, "unfinished_products": 0},
                     {},
                     set(),
                     set(),
-                    None,
+                    {},
+                    {},
                 )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,23 +203,22 @@ class ReviewWorkbenchTests(unittest.TestCase):
 
         self.assertIsNotNone(state)
 
-    def test_total_products_comes_from_workbook_codes(self):
+    def test_total_products_comes_from_sqlite_codes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
-                    (3, ["CODE2", "http://example.com/standard-main.jpg", "standard", "", "否", ""]),
-                    (4, ["CODE3", "http://example.com/c.jpg", "cutout", "已处理", "是", ""]),
-                    (5, ["CODE4", "http://example.com/standard-ref.jpg", "standard", "", "否", ""]),
-                    (6, ["CODE4", "http://example.com/d.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
+                (3, ["CODE2", "http://example.com/standard-main.jpg", "standard", "", "否", ""]),
+                (4, ["CODE3", "http://example.com/c.jpg", "cutout", "已处理", "是", ""]),
+                (5, ["CODE4", "http://example.com/standard-ref.jpg", "standard", "", "否", ""]),
+                (6, ["CODE4", "http://example.com/d.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -218,11 +241,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual(state.metrics, {"total_products": 4, "completed_products": 0, "invalid_products": 1, "pending_annotation_products": 1, "unfinished_products": 3})
         self.assertEqual([item.outward_code for item in batch], ["CODE1"])
 
-    def test_review_workbench_reads_legacy_csv_status_without_xlsx_status(self):
+    def test_review_workbench_ignores_legacy_csv_status_at_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result_root = root / "商品标注结果"
             status_csv = root / "manual_status.csv"
+            state_db = root / "goods_marking.db"
             write_product_result(
                 result_root,
                 "CODE1",
@@ -232,12 +256,16 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 ],
             )
             write_status_csv(status_csv, [{"outward_code": "CODE1", "image_url": "http://example.com/a.jpg", "人工标注状态": "合格"}])
+            StateDb(state_db).upsert_product_images([
+                {"outward_code": "CODE1", "image_url": "http://example.com/a.jpg", "source": "cutout", "row_number": "2"},
+                {"outward_code": "CODE1", "image_url": "http://example.com/b.jpg", "source": "cutout", "row_number": "3"},
+            ])
 
-            workbench = ReviewWorkbench(result_root, status_file=status_csv, batch_size=20)
+            workbench = ReviewWorkbench(result_root, status_file=status_csv, state_db=state_db, batch_size=20)
             state = workbench.build_state()
 
         self.assertEqual({image.image_url: image.review_status for image in state.products[0].images}, {
-            "http://example.com/a.jpg": "合格",
+            "http://example.com/a.jpg": "",
             "http://example.com/b.jpg": "",
         })
 
@@ -289,15 +317,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片"]),
-                    (2, ["CODE1", "http://example.com/ref-a.jpg", "standard", "未处理", "否"]),
-                    (3, ["CODE1", "http://example.com/ref-b.jpg", "standard", "未处理", "否"]),
-                    (4, ["CODE2", "http://example.com/raw-a.jpg", "cutout", "未处理", "否"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片"]),
+                (2, ["CODE1", "http://example.com/ref-a.jpg", "standard", "未处理", "否"]),
+                (3, ["CODE1", "http://example.com/ref-b.jpg", "standard", "未处理", "否"]),
+                (4, ["CODE2", "http://example.com/raw-a.jpg", "cutout", "未处理", "否"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_raw_images(
                 result_root,
                 "CODE1",
@@ -323,18 +350,17 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/pending-a.jpg", "cutout", "已处理", "是", ""]),
-                    (3, ["CODE2", "http://example.com/partial-a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (4, ["CODE2", "http://example.com/partial-b.jpg", "cutout", "已处理", "是", ""]),
-                    (5, ["CODE3", "http://example.com/done-a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (6, ["CODE4", "http://example.com/ref-a.jpg", "standard", "未处理", "否", ""]),
-                    (7, ["CODE5", "http://example.com/no-final-a.jpg", "cutout", "未处理", "否", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/pending-a.jpg", "cutout", "已处理", "是", ""]),
+                (3, ["CODE2", "http://example.com/partial-a.jpg", "cutout", "已处理", "是", "合格"]),
+                (4, ["CODE2", "http://example.com/partial-b.jpg", "cutout", "已处理", "是", ""]),
+                (5, ["CODE3", "http://example.com/done-a.jpg", "cutout", "已处理", "是", "合格"]),
+                (6, ["CODE4", "http://example.com/ref-a.jpg", "standard", "未处理", "否", ""]),
+                (7, ["CODE5", "http://example.com/no-final-a.jpg", "cutout", "未处理", "否", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -354,7 +380,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 [{"url": "http://example.com/done-a.jpg", "source_name": "r4.jpg", "result_filename": "01__r4.jpg"}],
             )
 
-            state = ReviewWorkbench(result_root, workbook, batch_size=20).build_state()
+            state = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db).build_state()
 
         self.assertEqual(state.metrics["pending_annotation_products"], 1)
         self.assertEqual(state.metrics["completed_products"], 1)
@@ -367,15 +393,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                    (4, ["CODE2", "http://example.com/c.jpg", "cutout", "已处理", "是", "不合格"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
+                (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+                (4, ["CODE2", "http://example.com/c.jpg", "cutout", "已处理", "是", "不合格"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -406,14 +431,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是"]),
-                    (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是"]),
+                (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -439,16 +463,15 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/standard-1.jpg", "standard", "", "否", ""]),
-                    (3, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (4, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                    (5, ["CODE2", "http://example.com/standard-2.jpg", "standard", "", "否", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/standard-1.jpg", "standard", "", "否", ""]),
+                (3, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
+                (4, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+                (5, ["CODE2", "http://example.com/standard-2.jpg", "standard", "", "否", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -457,14 +480,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
                     {"url": "http://example.com/b.jpg", "source_name": "r000003__cutout__bbbb.jpg", "result_filename": "02_back_barcode__002__r000003__cutout__bbbb.jpg"},
                 ],
             )
-
-            rows = ReviewWorkbench(result_root, workbook, batch_size=20).product_summaries()
+            rows = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db).product_summaries()
 
         self.assertEqual(
             rows,
             [
                 {
                     "outward_code": "CODE1",
+                    "standard_image_url": "http://example.com/standard-1.jpg",
                     "standard_count": 1,
                     "cutout_count": 2,
                     "final_count": 2,
@@ -474,6 +497,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 },
                 {
                     "outward_code": "CODE2",
+                    "standard_image_url": "http://example.com/standard-2.jpg",
                     "standard_count": 1,
                     "cutout_count": 0,
                     "final_count": 0,
@@ -484,21 +508,42 @@ class ReviewWorkbenchTests(unittest.TestCase):
             ],
         )
 
+    def test_product_summaries_use_sqlite_product_images_without_workbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_db = root / "goods_marking.db"
+            result_root = root / "商品标注结果"
+            StateDb(state_db).upsert_product_images([
+                {"outward_code": "CODE1", "image_url": "http://example.com/ref-a.jpg", "source": "standard", "row_number": "2"},
+                {"outward_code": "CODE1", "image_url": "http://example.com/raw-a.jpg", "source": "cutout", "row_number": "3"},
+                {"outward_code": "CODE2", "image_url": "http://example.com/ref-b.jpg", "source": "standard", "row_number": "4"},
+            ])
+            write_product_result(result_root, "CODE1", [{"url": "http://example.com/raw-a.jpg", "source_name": "raw-a.jpg", "result_filename": "raw-a.jpg"}])
+
+            rows = ReviewWorkbench(result_root, None, batch_size=20, state_db=state_db).product_summaries()
+
+        self.assertEqual([row["outward_code"] for row in rows], ["CODE1", "CODE2"])
+        self.assertEqual(rows[0]["standard_image_url"], "http://example.com/ref-a.jpg")
+        self.assertEqual(rows[0]["standard_count"], 1)
+        self.assertEqual(rows[0]["cutout_count"], 1)
+        self.assertEqual(rows[1]["standard_count"], 1)
+        self.assertEqual(rows[1]["cutout_count"], 0)
+        self.assertEqual(rows[1]["status"], "无效商品")
+
     def test_product_payload_defaults_to_first_unfinished_product_and_can_select_code(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                    (4, ["CODE3", "http://example.com/c.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
+                (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+                (4, ["CODE3", "http://example.com/c.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
             write_product_result(result_root, "CODE3", [{"url": "http://example.com/c.jpg", "source_name": "r3.jpg", "result_filename": "01__r3.jpg"}])
@@ -518,14 +563,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
-                    (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", "合格"]),
+                (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
             workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
@@ -545,14 +589,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
-                    (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
+                (3, ["CODE2", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(result_root, "CODE1", [{"url": "http://example.com/a.jpg", "source_name": "r1.jpg", "result_filename": "01__r1.jpg"}])
             write_product_result(result_root, "CODE2", [{"url": "http://example.com/b.jpg", "source_name": "r2.jpg", "result_filename": "01__r2.jpg"}])
             workbench = ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db)
@@ -570,14 +613,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
-                    (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
+                (3, ["CODE1", "http://example.com/b.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -603,14 +645,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", "不合格"]),
-                    (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", "不合格"]),
+                (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_raw_images(
                 result_root,
                 "CODE1",
@@ -620,7 +661,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 ],
             )
 
-            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20), "CODE1")
+            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), "CODE1")
 
         self.assertEqual([item["review_status"] for item in payload["raw_images"]], ["不合格", ""])
 
@@ -630,14 +671,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "是", ""]),
-                    (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "是", ""]),
+                (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -654,7 +694,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 ],
             )
 
-            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20), "CODE1")
+            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), "CODE1")
 
         self.assertEqual([item["review_status"] for item in payload["raw_images"]], ["", ""])
         self.assertEqual([item["in_final_result"] for item in payload["raw_images"]], [True, False])
@@ -668,13 +708,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
             product = result_root / "CODE1"
             final = product / "最终结果"
             final.mkdir(parents=True)
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/assets/frame_001.jpg", "cutout", "已处理", "是", "合格"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/assets/frame_001.jpg", "cutout", "已处理", "是", "合格"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             with open(product / "manifest.csv", "w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=["row_number", "url", "source", "status", "filename", "error"])
                 writer.writeheader()
@@ -688,7 +727,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 })
             Image.new("RGB", (48, 48), (120, 120, 120)).save(final / "01_manual__001__frame_001.jpg")
 
-            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20), "CODE1")
+            payload = _product_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), "CODE1")
 
         self.assertEqual(payload["images"][0]["image_url"], "http://example.com/assets/frame_001.jpg")
         self.assertEqual(payload["images"][0]["review_status"], "合格")
@@ -699,14 +738,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", ""]),
-                    (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", "不合格"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", ""]),
+                (3, ["CODE1", "http://example.com/raw-b.jpg", "cutout", "已处理", "否", "不合格"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_raw_images(
                 result_root,
                 "CODE1",
@@ -739,13 +777,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/raw-a.jpg", "cutout", "已处理", "否", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_raw_images(
                 result_root,
                 "CODE1",
@@ -771,10 +808,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(workbook, [(1, ["outward_code", "image_url"]), (2, ["CODE1", "http://example.com/a.jpg"])])
+            rows = [(1, ["outward_code", "image_url"]), (2, ["CODE1", "http://example.com/a.jpg"])]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
 
-            payload = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20))
+            payload = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db))
 
         self.assertEqual(payload["products"][0]["outward_code"], "CODE1")
         self.assertEqual(payload["products"][0]["status"], "无最终结果")
@@ -801,13 +841,15 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
             rows = [(1, ["outward_code", "image_url"])]
             rows.extend((index + 1, [f"CODE{index:03d}", f"http://example.com/{index}.jpg"]) for index in range(1, 56))
             write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
 
-            first_page = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20))
-            second_page = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20), page=2)
+            first_page = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db))
+            second_page = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), page=2)
 
         self.assertEqual(first_page["pagination"], {"page": 1, "page_size": 50, "total": 55, "total_pages": 2, "query": ""})
         self.assertEqual(len(first_page["products"]), 50)
@@ -819,18 +861,18 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url"]),
-                    (2, ["ABC001", "http://example.com/a.jpg"]),
-                    (3, ["ABC002", "http://example.com/b.jpg"]),
-                    (4, ["XYZ001", "http://example.com/c.jpg"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url"]),
+                (2, ["ABC001", "http://example.com/a.jpg"]),
+                (3, ["ABC002", "http://example.com/b.jpg"]),
+                (4, ["XYZ001", "http://example.com/c.jpg"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
 
-            payload = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20), query="abc")
+            payload = _products_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db), query="abc")
 
         self.assertEqual([row["outward_code"] for row in payload["products"]], ["ABC001", "ABC002"])
         self.assertEqual(payload["pagination"], {"page": 1, "page_size": 50, "total": 2, "total_pages": 1, "query": "abc"})
@@ -841,14 +883,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
             workbook = root / "status.xlsx"
             state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout"]),
-                    (3, ["CODE12", "http://example.com/c.jpg", "cutout"]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout"]),
+                (3, ["CODE1", "http://example.com/b.jpg", "cutout"]),
+                (4, ["CODE12", "http://example.com/c.jpg", "cutout"]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_raw_images(
                 result_root,
                 "CODE1",
@@ -869,6 +911,11 @@ class ReviewWorkbenchTests(unittest.TestCase):
 
         self.assertEqual(payload["pagination"]["page_size"], 100)
         self.assertEqual(payload["pagination"]["total"], 2)
+        self.assertEqual(payload["image_metrics"], {
+            "total_images": 2,
+            "model_final_images": 1,
+            "qualified_images": 1,
+        })
         self.assertEqual([row["outward_code"] for row in payload["images"]], ["CODE1", "CODE1"])
         self.assertEqual([row["download_status"] for row in payload["images"]], ["downloaded", "failed"])
         self.assertEqual([row["model_status"] for row in payload["images"]], ["模型选中", "模型排除"])
@@ -896,14 +943,14 @@ class ReviewWorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
             result_root = root / "商品标注结果"
-            write_status_workbook(
-                workbook,
-                [
-                    (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
-                    (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
-                ],
-            )
+            rows = [
+                (1, ["outward_code", "image_url", "source", "图片处理进度", "最终结果是否包含该图片", "人工标注状态"]),
+                (2, ["CODE1", "http://example.com/a.jpg", "cutout", "已处理", "是", ""]),
+            ]
+            write_status_workbook(workbook, rows)
+            seed_state_db_from_workbook_rows(state_db, rows)
             write_product_result(
                 result_root,
                 "CODE1",
@@ -916,7 +963,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
             Image.new("RGB", (48, 48), (40, 80, 120)).save(raw_dir / "r000002__cutout__aaaa.jpg")
             Image.new("RGB", (48, 48), (80, 120, 40)).save(raw_dir / "r000003__cutout__bbbb.jpg")
 
-            payload = _batch_payload(ReviewWorkbench(result_root, workbook, batch_size=20))
+            payload = _batch_payload(ReviewWorkbench(result_root, workbook, batch_size=20, state_db=state_db))
 
         self.assertEqual(payload["product"], {"outward_code": "CODE1", "status": "待标注"})
         self.assertEqual([item["result_filename"] for item in payload["raw_images"]], ["r000002__cutout__aaaa.jpg", "r000003__cutout__bbbb.jpg"])
@@ -944,7 +991,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual(args.port, 8999)
         self.assertEqual(args.batch_size, 12)
 
-    def test_cli_review_workbench_defaults_to_csv_status_without_source_workbook(self):
+    def test_cli_review_workbench_defaults_to_sqlite_state_db(self):
         args = build_parser().parse_args(["review-workbench"])
 
         self.assertEqual(args.source_workbook, "")
@@ -983,12 +1030,20 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('id="nextPage"', _HTML)
         self.assertIn("page_size=50", _HTML)
 
+    def test_workbench_html_shows_product_image_column_in_stats(self):
+        self.assertIn("<th>商品图片</th>", _HTML)
+        self.assertIn("row.standard_image_url", _HTML)
+
     def test_workbench_html_has_all_images_search_and_100_row_pagination(self):
         self.assertIn('id="imageSearch"', _HTML)
         self.assertIn("精准编码搜索", _HTML)
         self.assertIn("每页100张图片", _HTML)
         self.assertIn("page_size=100", _HTML)
         self.assertIn("renderAllImages", _HTML)
+        self.assertIn("全部图片数", _HTML)
+        self.assertIn("模型最终结果数", _HTML)
+        self.assertIn("合格数", _HTML)
+        self.assertIn("renderImageMetrics", _HTML)
 
     def test_workbench_html_retries_while_state_is_loading(self):
         self.assertIn("数据加载中", _HTML)
