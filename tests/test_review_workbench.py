@@ -908,6 +908,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
             StateDb(state_db).upsert_review_statuses({("CODE1", "http://example.com/a.jpg"): "合格"})
 
             payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1")
+            model_payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1", filter_by="model_final")
+            qualified_payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1", filter_by="qualified")
 
         self.assertEqual(payload["pagination"]["page_size"], 100)
         self.assertEqual(payload["pagination"]["total"], 2)
@@ -920,6 +922,12 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual([row["download_status"] for row in payload["images"]], ["downloaded", "failed"])
         self.assertEqual([row["model_status"] for row in payload["images"]], ["模型选中", "模型排除"])
         self.assertEqual([row["manual_status"] for row in payload["images"]], ["合格", "未标注"])
+        self.assertEqual(model_payload["pagination"]["total"], 1)
+        self.assertEqual(model_payload["pagination"]["filter"], "model_final")
+        self.assertEqual([row["result_filename"] for row in model_payload["images"]], ["a.jpg"])
+        self.assertEqual(qualified_payload["pagination"]["total"], 1)
+        self.assertEqual(qualified_payload["pagination"]["filter"], "qualified")
+        self.assertEqual([row["manual_status"] for row in qualified_payload["images"]], ["合格"])
         self.assertTrue(all(row["image_src"].startswith("/image/") for row in payload["images"]))
 
     def test_images_payload_paginates_all_raw_images_by_100(self):
@@ -1029,6 +1037,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('id="prevPage"', _HTML)
         self.assertIn('id="nextPage"', _HTML)
         self.assertIn("page_size=50", _HTML)
+        self.assertIn("input{min-height:44px", _HTML)
 
     def test_workbench_html_shows_product_image_column_in_stats(self):
         self.assertIn("<th>商品图片</th>", _HTML)
@@ -1040,10 +1049,15 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn("每页100张图片", _HTML)
         self.assertIn("page_size=100", _HTML)
         self.assertIn("renderAllImages", _HTML)
+        self.assertIn('id="mainMetrics"', _HTML)
+        self.assertIn("mainMetrics.style.display=name==='images'?'none':'flex'", _HTML)
         self.assertIn("全部图片数", _HTML)
         self.assertIn("模型最终结果数", _HTML)
         self.assertIn("合格数", _HTML)
         self.assertIn("renderImageMetrics", _HTML)
+        self.assertIn("setImageFilter('model_final')", _HTML)
+        self.assertIn("setImageFilter('qualified')", _HTML)
+        self.assertIn("&filter=${encodeURIComponent(imageFilter)}", _HTML)
 
     def test_workbench_html_retries_while_state_is_loading(self):
         self.assertIn("数据加载中", _HTML)
@@ -1081,7 +1095,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('bottom:18px', _HTML)
         self.assertIn('left:50%', _HTML)
         self.assertIn('transform:translateX(-50%)', _HTML)
-        self.assertIn('padding-bottom:92px', _HTML)
+        self.assertIn('padding-bottom:104px', _HTML)
 
 
 if __name__ == "__main__":
