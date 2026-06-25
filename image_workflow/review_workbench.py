@@ -283,6 +283,27 @@ def _score_sources(path: Path) -> dict[str, str]:
         return {row.get("result_filename", ""): row.get("source_name", "") for row in rows if _truthy(row.get("selected_final", ""))}
 
 
+def raw_manifest_rows(product_dir: str | Path) -> dict[str, dict[str, str]]:
+    path = Path(product_dir) / "商品原始照片" / "manifest.csv"
+    if not path.exists():
+        return {}
+    with open(path, newline="", encoding="utf-8") as handle:
+        return {row.get("filename", ""): row for row in csv.DictReader(handle)}
+
+
+def model_statuses(product_dir: str | Path) -> dict[str, str]:
+    path = Path(product_dir) / "model_scores.csv"
+    if not path.exists():
+        return {}
+    statuses = {}
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            source_name = row.get("source_name", "")
+            if source_name:
+                statuses[source_name] = "模型选中" if _truthy(row.get("selected_final", "")) else "模型排除"
+    return statuses
+
+
 def _source_from_result_name(result_name: str, manifest: dict[str, str]) -> str:
     stem = Path(result_name).stem.split("__", 2)[-1]
     for filename in manifest:

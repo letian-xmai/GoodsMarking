@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 from image_workflow.review_workbench import ReviewState, ReviewWorkbench, read_review_statuses
 from image_workflow.review_xlsx import read_workbook_product_summary
 from image_workflow.cli import DEFAULT_REVIEW_HOST, DEFAULT_REVIEW_PORT, DEFAULT_STATE_DB, build_parser
-from image_workflow.review_server import _HTML, _batch_payload, _product_payload, _products_payload
+from image_workflow.review_server import _HTML, _batch_payload, _images_payload, _product_payload, _products_payload
 from image_workflow.state_db import StateDb
 
 
@@ -64,7 +64,7 @@ def write_product_result(root, outward_code, images):
                 "row_number": str(index + 1),
                 "url": item["url"],
                 "source": "cutout",
-                "status": "downloaded",
+                "status": item.get("status", "downloaded"),
                 "filename": item["source_name"],
                 "error": "",
             })
@@ -89,7 +89,7 @@ def write_raw_images(root, outward_code, images):
                 "row_number": str(index + 1),
                 "url": item["url"],
                 "source": "cutout",
-                "status": "downloaded",
+                "status": item.get("status", "downloaded"),
                 "filename": filename,
                 "error": "",
             })
@@ -835,6 +835,63 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual([row["outward_code"] for row in payload["products"]], ["ABC001", "ABC002"])
         self.assertEqual(payload["pagination"], {"page": 1, "page_size": 50, "total": 2, "total_pages": 1, "query": "abc"})
 
+    def test_images_payload_lists_all_raw_images_with_exact_code_search_and_100_page_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workbook = root / "status.xlsx"
+            state_db = root / "goods_marking.db"
+            result_root = root / "商品标注结果"
+            write_status_workbook(
+                workbook,
+                [
+                    (1, ["outward_code", "image_url", "source"]),
+                    (2, ["CODE1", "http://example.com/a.jpg", "cutout"]),
+                    (3, ["CODE12", "http://example.com/c.jpg", "cutout"]),
+                ],
+            )
+            write_raw_images(
+                result_root,
+                "CODE1",
+                [
+                    {"url": "http://example.com/a.jpg", "filename": "a.jpg", "status": "downloaded"},
+                    {"url": "http://example.com/b.jpg", "filename": "b.jpg", "status": "failed"},
+                ],
+            )
+            write_raw_images(result_root, "CODE12", [{"url": "http://example.com/c.jpg", "filename": "c.jpg"}])
+            with open(result_root / "CODE1" / "model_scores.csv", "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["source_name", "selected_final"])
+                writer.writeheader()
+                writer.writerow({"source_name": "a.jpg", "selected_final": "True"})
+                writer.writerow({"source_name": "b.jpg", "selected_final": "False"})
+            StateDb(state_db).upsert_review_statuses({("CODE1", "http://example.com/a.jpg"): "合格"})
+
+            payload = _images_payload(ReviewWorkbench(result_root, workbook, state_db=state_db), query="CODE1")
+
+        self.assertEqual(payload["pagination"]["page_size"], 100)
+        self.assertEqual(payload["pagination"]["total"], 2)
+        self.assertEqual([row["outward_code"] for row in payload["images"]], ["CODE1", "CODE1"])
+        self.assertEqual([row["download_status"] for row in payload["images"]], ["downloaded", "failed"])
+        self.assertEqual([row["model_status"] for row in payload["images"]], ["模型选中", "模型排除"])
+        self.assertEqual([row["manual_status"] for row in payload["images"]], ["合格", "未标注"])
+        self.assertTrue(all(row["image_src"].startswith("/image/") for row in payload["images"]))
+
+    def test_images_payload_paginates_all_raw_images_by_100(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result_root = root / "商品标注结果"
+            raw_images = [
+                {"url": f"http://example.com/{index}.jpg", "filename": f"{index}.jpg"}
+                for index in range(101)
+            ]
+            write_raw_images(result_root, "CODE1", raw_images)
+
+            first = _images_payload(ReviewWorkbench(result_root, state_db=root / "goods_marking.db"))
+            second = _images_payload(ReviewWorkbench(result_root, state_db=root / "goods_marking.db"), page=2)
+
+        self.assertEqual(len(first["images"]), 100)
+        self.assertEqual(len(second["images"]), 1)
+        self.assertEqual(first["pagination"]["total_pages"], 2)
+
     def test_batch_payload_includes_current_product_status_and_original_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -908,8 +965,10 @@ class ReviewWorkbenchTests(unittest.TestCase):
     def test_workbench_html_has_product_annotation_and_stats_menus(self):
         self.assertIn("商品标注", _HTML)
         self.assertIn("商品统计", _HTML)
+        self.assertIn("全部图片", _HTML)
         self.assertIn("去标注", _HTML)
         self.assertIn("/api/products", _HTML)
+        self.assertIn("/api/images", _HTML)
         self.assertIn("/api/product/submit", _HTML)
 
     def test_workbench_html_displays_pending_annotation_metric(self):
@@ -923,6 +982,13 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertIn('id="prevPage"', _HTML)
         self.assertIn('id="nextPage"', _HTML)
         self.assertIn("page_size=50", _HTML)
+
+    def test_workbench_html_has_all_images_search_and_100_row_pagination(self):
+        self.assertIn('id="imageSearch"', _HTML)
+        self.assertIn("精准编码搜索", _HTML)
+        self.assertIn("每页100张图片", _HTML)
+        self.assertIn("page_size=100", _HTML)
+        self.assertIn("renderAllImages", _HTML)
 
     def test_workbench_html_retries_while_state_is_loading(self):
         self.assertIn("数据加载中", _HTML)
