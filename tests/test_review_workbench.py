@@ -919,8 +919,8 @@ class ReviewWorkbenchTests(unittest.TestCase):
             "qualified_images": 1,
         })
         self.assertEqual([row["outward_code"] for row in payload["images"]], ["CODE1", "CODE1"])
-        self.assertEqual([row["download_status"] for row in payload["images"]], ["downloaded", "failed"])
-        self.assertEqual([row["model_status"] for row in payload["images"]], ["模型选中", "模型排除"])
+        self.assertEqual([row["download_status"] for row in payload["images"]], ["", ""])
+        self.assertEqual([row["model_status"] for row in payload["images"]], ["", ""])
         self.assertEqual([row["manual_status"] for row in payload["images"]], ["合格", "未标注"])
         self.assertEqual(model_payload["pagination"]["total"], 1)
         self.assertEqual(model_payload["pagination"]["filter"], "model_final")
@@ -928,7 +928,7 @@ class ReviewWorkbenchTests(unittest.TestCase):
         self.assertEqual(qualified_payload["pagination"]["total"], 1)
         self.assertEqual(qualified_payload["pagination"]["filter"], "qualified")
         self.assertEqual([row["manual_status"] for row in qualified_payload["images"]], ["合格"])
-        self.assertTrue(all(row["image_src"].startswith("/image/") for row in payload["images"]))
+        self.assertEqual([row["image_src"] for row in payload["images"]], ["http://example.com/a.jpg", "http://example.com/b.jpg"])
 
     def test_images_payload_paginates_all_raw_images_by_100(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -939,6 +939,10 @@ class ReviewWorkbenchTests(unittest.TestCase):
                 for index in range(101)
             ]
             write_raw_images(result_root, "CODE1", raw_images)
+            StateDb(root / "goods_marking.db").upsert_product_images([
+                {"outward_code": "CODE1", "image_url": item["url"], "source": "cutout", "row_number": str(index)}
+                for index, item in enumerate(raw_images, 1)
+            ])
 
             first = _images_payload(ReviewWorkbench(result_root, state_db=root / "goods_marking.db"))
             second = _images_payload(ReviewWorkbench(result_root, state_db=root / "goods_marking.db"), page=2)

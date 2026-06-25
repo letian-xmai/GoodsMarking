@@ -173,6 +173,8 @@ class ReviewWorkbench:
         product_by_code = {product.outward_code: product for product in state.products}
         codes = sorted(state.product_codes or set(product_by_code))
         standard_image_urls = self.state_db.first_standard_image_urls(set(codes)) if self.state_db else {}
+        selected_counts = _progress_selected_counts(self.state_db.read_progress()) if self.state_db else {}
+        valid_counts = self.state_db.review_status_counts_by_product(VALID_STATUS) if self.state_db else {}
         rows = []
         for code in codes:
             product = product_by_code.get(code)
@@ -182,8 +184,8 @@ class ReviewWorkbench:
                 "standard_image_url": standard_image_urls.get(code, ""),
                 "standard_count": state.standard_counts.get(code, 0),
                 "cutout_count": state.cutout_counts.get(code, 0),
-                "final_count": len(images),
-                "manual_count": sum(1 for image in images if image.review_status == VALID_STATUS),
+                "final_count": selected_counts.get(code, len(images)),
+                "manual_count": valid_counts.get(code, 0),
                 "status": product_summary_status(product, code in state.invalid_product_codes),
                 "action": "去标注",
             })
@@ -470,3 +472,19 @@ def _empty_product_summary() -> dict[str, object]:
         "standard_counts": {},
         "cutout_counts": {},
     }
+
+
+def _progress_selected_counts(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts = {}
+    for row in rows:
+        code = str(row.get("outward_code", "")).strip()
+        if code:
+            counts[code] = _int_value(row.get("selected_count", "0"))
+    return counts
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError:
+        return 0

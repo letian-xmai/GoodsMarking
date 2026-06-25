@@ -181,6 +181,92 @@ class StateDb:
             "cutout_counts": cutout_counts,
         }
 
+    def product_summary_rows(self, query: str = "", limit: int = 50, offset: int = 0) -> list[dict[str, object]]:
+        where_sql = "WHERE p.outward_code LIKE ?" if query else ""
+        where_params: list[object] = [f"%{query}%"] if query else []
+        params = [*where_params, max(1, limit), max(0, offset)]
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT p.outward_code,
+                       SUM(CASE WHEN p.is_standard = 1 THEN 1 ELSE 0 END) AS standard_count,
+                       SUM(CASE WHEN p.is_standard = 1 THEN 0 ELSE 1 END) AS cutout_count,
+                       COALESCE(MAX(CAST(g.selected_count AS INTEGER)), 0) AS final_count,
+                       COALESCE(MAX(q.qualified_count), 0) AS manual_count,
+                       COALESCE(MAX(g.status), '') AS status,
+                       (
+                         SELECT image_url
+                         FROM product_images s
+                         WHERE s.outward_code = p.outward_code AND s.is_standard = 1
+                         ORDER BY s.row_number, s.image_url
+                         LIMIT 1
+                       ) AS standard_image_url
+                FROM product_images p
+                LEFT JOIN product_progress g ON p.outward_code = g.outward_code
+                LEFT JOIN (
+                    SELECT outward_code, COUNT(*) AS qualified_count
+                    FROM image_review_status
+                    WHERE manual_status = '合格'
+                    GROUP BY outward_code
+                ) q ON p.outward_code = q.outward_code
+                {where_sql}
+                GROUP BY p.outward_code
+                ORDER BY p.outward_code
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_product_summary_rows(self, query: str = "") -> int:
+        params: list[object] = []
+        where_sql = ""
+        if query:
+            where_sql = "WHERE outward_code LIKE ?"
+            params.append(f"%{query}%")
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            row = conn.execute(
+                f"SELECT COUNT(DISTINCT outward_code) AS count FROM product_images {where_sql}",
+                params,
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def workflow_metrics(self) -> dict[str, int]:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            total = conn.execute("SELECT COUNT(DISTINCT outward_code) AS count FROM product_images").fetchone()
+            completed = conn.execute(
+                "SELECT COUNT(*) AS count FROM product_progress WHERE status = 'complete'"
+            ).fetchone()
+            pending_annotation = conn.execute(
+                "SELECT COUNT(*) AS count FROM product_progress WHERE needs_review = 'yes'"
+            ).fetchone()
+            all_standard = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM (
+                    SELECT outward_code,
+                           COUNT(*) AS total_count,
+                           SUM(CASE WHEN is_standard = 1 THEN 1 ELSE 0 END) AS standard_count
+                    FROM product_images
+                    GROUP BY outward_code
+                    HAVING total_count > 0 AND total_count = standard_count
+                )
+                """
+            ).fetchone()
+        total_products = int(total["count"] or 0)
+        completed_products = int(completed["count"] or 0)
+        invalid_products = int(all_standard["count"] or 0)
+        return {
+            "total_products": total_products,
+            "completed_products": completed_products,
+            "invalid_products": invalid_products,
+            "pending_annotation_products": int(pending_annotation["count"] or 0),
+            "unfinished_products": max(0, total_products - completed_products - invalid_products),
+        }
+
     def count_product_images(self, outward_code: str = "") -> int:
         with self._connect() as conn:
             self._ensure_schema(conn)
@@ -191,6 +277,60 @@ class StateDb:
                 ).fetchone()
             else:
                 row = conn.execute("SELECT COUNT(*) AS count FROM product_images").fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def product_image_rows(self, outward_code: str = "", manual_status: str = "", limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        where = []
+        params: list[object] = []
+        if outward_code:
+            where.append("p.outward_code = ?")
+            params.append(outward_code)
+        if manual_status:
+            where.append("COALESCE(r.manual_status, '') = ?")
+            params.append(manual_status)
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        params.extend([max(1, limit), max(0, offset)])
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT p.outward_code, p.image_url, p.source, p.row_number,
+                       COALESCE(r.manual_status, '') AS manual_status
+                FROM product_images p
+                LEFT JOIN image_review_status r
+                  ON p.outward_code = r.outward_code
+                 AND p.image_url = r.image_url
+                {where_sql}
+                ORDER BY p.outward_code, p.row_number, p.image_url
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+        return [{key: "" if row[key] is None else str(row[key]) for key in row.keys()} for row in rows]
+
+    def count_product_image_rows(self, outward_code: str = "", manual_status: str = "") -> int:
+        where = []
+        params: list[object] = []
+        if outward_code:
+            where.append("p.outward_code = ?")
+            params.append(outward_code)
+        if manual_status:
+            where.append("COALESCE(r.manual_status, '') = ?")
+            params.append(manual_status)
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM product_images p
+                LEFT JOIN image_review_status r
+                  ON p.outward_code = r.outward_code
+                 AND p.image_url = r.image_url
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
         return int(row["count"] or 0) if row else 0
 
     def count_review_status(self, manual_status: str, outward_code: str = "") -> int:
@@ -210,6 +350,20 @@ class StateDb:
                     (manual_status,),
                 ).fetchone()
         return int(row["count"] or 0) if row else 0
+
+    def review_status_counts_by_product(self, manual_status: str) -> dict[str, int]:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT outward_code, COUNT(*) AS count
+                FROM image_review_status
+                WHERE manual_status = ?
+                GROUP BY outward_code
+                """,
+                (manual_status,),
+            ).fetchall()
+        return {str(row["outward_code"]): int(row["count"] or 0) for row in rows}
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)

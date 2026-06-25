@@ -109,6 +109,8 @@ def _batch_payload(workbench: ReviewWorkbench, blocking: bool = True) -> dict:
 def _products_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 50, query: str = "", blocking: bool = True) -> dict:
     clean_query = str(query or "").strip()
     safe_page_size = max(1, page_size)
+    if getattr(workbench, "state_db", None):
+        return _sqlite_products_payload(workbench, page, safe_page_size, clean_query)
     state = workbench.state_snapshot(blocking=blocking)
     if state is None:
         return {
@@ -138,10 +140,53 @@ def _products_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int 
     }
 
 
+def _sqlite_products_payload(workbench: ReviewWorkbench, page: int, page_size: int, query: str) -> dict:
+    total = workbench.state_db.count_product_summary_rows(query)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    safe_page = min(max(1, page), total_pages)
+    offset = (safe_page - 1) * page_size
+    rows = [_sqlite_product_row(row) for row in workbench.state_db.product_summary_rows(query, page_size, offset)]
+    return {
+        "metrics": workbench.state_db.workflow_metrics(),
+        "products": rows,
+        "pagination": {
+            "page": safe_page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "query": query,
+        },
+    }
+
+
+def _sqlite_product_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "outward_code": str(row.get("outward_code", "")),
+        "standard_image_url": str(row.get("standard_image_url") or ""),
+        "standard_count": int(row.get("standard_count") or 0),
+        "cutout_count": int(row.get("cutout_count") or 0),
+        "final_count": int(row.get("final_count") or 0),
+        "manual_count": int(row.get("manual_count") or 0),
+        "status": _progress_status_label(str(row.get("status") or "")),
+        "action": "去标注",
+    }
+
+
+def _progress_status_label(status: str) -> str:
+    return {
+        "complete": "已完成",
+        "shortfall": "不足40",
+        "skipped_all_standard": "无效商品",
+        "pending": "待处理",
+    }.get(status, status or "无最终结果")
+
+
 def _images_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 100, query: str = "", filter_by: str = "", blocking: bool = True) -> dict:
     clean_query = str(query or "").strip()
     clean_filter = str(filter_by or "").strip()
     safe_page_size = max(1, page_size)
+    if getattr(workbench, "state_db", None) and clean_filter != "model_final":
+        return _sqlite_images_payload(workbench, workbench.state_db.workflow_metrics(), clean_query, clean_filter, page, safe_page_size)
     state = workbench.state_snapshot(blocking=blocking)
     if state is None:
         return {
@@ -152,9 +197,9 @@ def _images_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 
             "pagination": {"page": 1, "page_size": safe_page_size, "total": 0, "total_pages": 1, "query": clean_query, "filter": clean_filter},
         }
     rows = _all_image_rows(workbench, state)
+    image_metrics = _image_metrics(workbench, clean_query, len(rows))
     if clean_query:
         rows = [row for row in rows if row["outward_code"] == clean_query]
-    image_metrics = _image_metrics(workbench, clean_query, len(rows))
     rows = _filter_image_rows(rows, clean_filter)
     total = len(rows)
     total_pages = max(1, (total + safe_page_size - 1) // safe_page_size)
@@ -172,6 +217,44 @@ def _images_payload(workbench: ReviewWorkbench, page: int = 1, page_size: int = 
             "query": clean_query,
             "filter": clean_filter,
         },
+    }
+
+
+def _sqlite_images_payload(workbench: ReviewWorkbench, metrics: dict, query: str, filter_by: str, page: int, page_size: int) -> dict:
+    manual_status = "合格" if filter_by == "qualified" else ""
+    total = workbench.state_db.count_product_image_rows(query, manual_status)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    safe_page = min(max(1, page), total_pages)
+    offset = (safe_page - 1) * page_size
+    image_rows = workbench.state_db.product_image_rows(query, manual_status, page_size, offset)
+    rows = [_sqlite_image_row(row) for row in image_rows]
+    return {
+        "metrics": metrics,
+        "image_metrics": _image_metrics(workbench, query, total),
+        "images": rows,
+        "pagination": {
+            "page": safe_page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "query": query,
+            "filter": filter_by,
+        },
+    }
+
+
+def _sqlite_image_row(row: dict[str, str]) -> dict[str, str]:
+    manual_status = row.get("manual_status", "")
+    image_url = row.get("image_url", "")
+    return {
+        "review_id": "",
+        "outward_code": row.get("outward_code", ""),
+        "result_filename": Path(unquote(urlparse(image_url).path)).name,
+        "image_url": image_url,
+        "download_status": "",
+        "model_status": "",
+        "manual_status": manual_status or "未标注",
+        "image_src": image_url,
     }
 
 
